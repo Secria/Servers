@@ -1,0 +1,18 @@
+FROM golang:1.23.4-alpine AS build
+WORKDIR /app
+RUN go install golang.org/dl/go1.24rc1@latest && go1.24rc1 download
+
+COPY shared/go.mod shared/go.sum /shared/
+RUN cd /shared && go1.24rc1 mod download
+
+COPY SMTP/go.mod SMTP/go.sum /app/
+RUN go1.24rc1 mod download
+COPY shared /shared
+COPY SMTP /app/
+RUN go1.24rc1 build ./cmd/main.go
+
+FROM alpine
+RUN apk update && apk upgrade
+COPY --from=build /app/main /main
+EXPOSE 25
+ENTRYPOINT /main

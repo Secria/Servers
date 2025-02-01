@@ -7,6 +7,6 @@ var FreePlanOptions = mongo_schemes.UserPlansConfig{
     Price: 0,
     SpaceLimit: 4*1024*1024, // 4 GB
     DailyEmailLimit: 100,
-    SubaddressLimit: 3,
+    AddressLimit: 3,
     TagLimit: 3,
 }

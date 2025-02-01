@@ -20,6 +20,7 @@ type ResponseEmail struct {
     Encryption int `json:"encryption"`
     KeyUsed string `json:"used_key"`
     From string `json:"from"`
+    MessageId string `json:"message_id"`
     Headers string `json:"headers"`
     Body string `json:"body"`
     CipherText string `json:"ciphertext,omitempty"`

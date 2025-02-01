@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +41,7 @@ func main() {
     user_collection := db.Collection("Users");
     email_collection := db.Collection("Emails");
     metadata_collection := db.Collection("EmailMetadata");
+    address_collection := db.Collection("Addresses")
 
     dh_priv, err := ecdh.P256().GenerateKey(rand.Reader)
     if err != nil {
@@ -55,6 +55,7 @@ func main() {
         MetadataCollection: metadata_collection,
         UserCollection: user_collection,
         EmailCollection: email_collection,
+        AddressCollection: address_collection,
         DHPrivateKey: *dh_priv,
         DHPublicKey: encoded_dh_pub,
     }
@@ -79,6 +80,7 @@ type Backend struct{
     MetadataCollection *mongo.Collection
     EmailCollection *mongo.Collection
     UserCollection *mongo.Collection
+    AddressCollection *mongo.Collection
     DHPublicKey string
     DHPrivateKey ecdh.PrivateKey
 }
@@ -92,54 +94,49 @@ func (b *Backend) NewSession(_ *smtp.Conn) (smtp.Session, error) {
 
 type ExtendedUser struct {
     mongo_schemes.User
-    Subaddress string
+    Address string
 }
 
 type Session struct{
     From string
+    FromDomain string
     To []ExtendedUser
     Backend *Backend
 }
 
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
     fmt.Println("Mail from:", from)
+    domain, good := extractDomain(from)
+    if !good {
+        return fmt.Errorf("Malformed address")
+    }
     s.From = from
+    s.FromDomain = domain
     return nil
 }
 
+// Use aggregation query for optimization
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-    user_domain := strings.Split(to, "@")
-    if len(user_domain) != 2 {
-        return fmt.Errorf("Malformed address")
-    }
+    filter := bson.D{{Key: "address", Value: to}}
 
-    user_key := strings.Split(user_domain[0], "+")
-    if len(user_key) != 2 {
-        return fmt.Errorf("You have to send the message to a subaddress")
-    }
-
-    email := user_key[0] + "@" + user_domain[1]
-
-    filter := bson.D{{Key: "email", Value: email}}
-
-    var user mongo_schemes.User
-    err := s.Backend.UserCollection.FindOne(context.TODO(), filter).Decode(&user)
+    var address mongo_schemes.EmailAddress
+    err := s.Backend.AddressCollection.FindOne(context.TODO(), filter).Decode(&address)
     if err == mongo.ErrNoDocuments {
-        log.Println("RCPT user not found:", email)
+        log.Println("RCPT user not found:", to)
         return fmt.Errorf("User not found")
     } else if err != nil {
         log.Println("Error finding rcpt user:", err.Error())
         return fmt.Errorf("Error")
     }
 
-    if !slices.Contains(user.Subaddresses, user_key[1]) {
-        log.Println("User doesn't have this subaddress active:", user_key[1])
-        return fmt.Errorf("User exists, but the subaddress is not correct")
-    }
+    filter = bson.D{{Key: "_id", Value: address.UserId}}
+
+    var user mongo_schemes.User
+    err = s.Backend.UserCollection.FindOne(context.TODO(), filter).Decode(&user)
 
     s.To = append(s.To, ExtendedUser{
         User: user,
-        Subaddress: user_key[1],
+        Address: to,
     })
 
     return nil
@@ -161,12 +158,9 @@ func (s *Session) Data(r io.Reader) error {
     }
 
     parsed_header := parsed_message.Header
-    message_id := parsed_header.Get("Message-ID")
     subject := parsed_header.Get("Subject")
-
+    message_id := parsed_header.Get("Message-ID")
     encrypted_email, encryption_key, err := encryption.EncryptEmail(raw_body)
-
-    log.Println("DH pub server:", s.Backend.DHPublicKey)
 
     email := mongo_schemes.Email{
         Encryption: mongo_schemes.Encryption_ECDH_MLKEM,
@@ -174,7 +168,6 @@ func (s *Session) Data(r io.Reader) error {
         Headers: string(raw_headers),
         Body: encrypted_email,
         DHPublicKey: s.Backend.DHPublicKey,
-        ReferenceCount: len(s.To),
     }
 
     encoded_email, err := bson.Marshal(email)
@@ -190,6 +183,11 @@ func (s *Session) Data(r io.Reader) error {
     inserted_id := res.InsertedID.(primitive.ObjectID)
     estimated_size := email_size + int(metadata_size)
 
+    if message_id == "" {
+        message_id = fmt.Sprintf("<%s@%s>", inserted_id.Hex(), s.FromDomain)
+    }
+
+
     var metadata []interface{}
     var to_ids []primitive.ObjectID
     for i := range s.To {
@@ -204,7 +202,7 @@ func (s *Session) Data(r io.Reader) error {
         m := mongo_schemes.Metadata{
             Size: estimated_size,
             KeyUsed: ev.UsedKey,
-            UserEmail: user.Email,
+            UsedAddress: user.Address,
             EmailID: inserted_id,
             MessageId: message_id,
             Subject: subject,
@@ -212,7 +210,6 @@ func (s *Session) Data(r io.Reader) error {
             Ciphertext: ev.CipherText,
             EncryptedKey: ev.SecondStageKey,
             Private: false,
-            Subaddress: user.Subaddress,
         }
 
         metadata = append(metadata, m)
@@ -243,6 +240,14 @@ func (s *Session) Reset() {
 
 func (s *Session) Logout() error {
     return nil
+}
+
+func extractDomain(address string) (string, bool) {
+    parts := strings.Split(address, "@")
+    if len(parts) != 2 {
+        return "", false
+    }
+    return parts[1], true
 }
 
 const separator = "\r\n\r\n"

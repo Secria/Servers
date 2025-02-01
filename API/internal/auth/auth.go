@@ -19,6 +19,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/argon2"
 )
@@ -90,7 +91,7 @@ func retrieveContacts(ctx context.Context, user_collection *mongo.Collection, em
 
     var contacts []api_utils.ContactResponse = make([]api_utils.ContactResponse, 0, len(emails)) 
     for _, u := range users {
-        contacts = append(contacts, api_utils.ContactResponse{Name: u.Name, Email: u.Email, MLKEMPublicKey: u.MainKey.MLKEMPublicKey, DHPublicKey: u.MainKey.DHPublicKey})
+        contacts = append(contacts, api_utils.ContactResponse{Name: u.Name, Email: u.MainEmail, MLKEMPublicKey: u.MainKey.MLKEMPublicKey, DHPublicKey: u.MainKey.DHPublicKey})
     }
 
     return contacts, nil
@@ -230,12 +231,12 @@ func check_valid_username(username string) bool {
 }
 
 func check_valid_domain(domain string) bool {
-    return domain == "secria.com"
+    return domain == "secria.me"
 }
 
 const CAPTCHA_URL = "https://www.google.com/recaptcha/api/siteverify"
 
-func Register(collection *mongo.Collection, captcha_secret string) http.Handler {
+func Register(user_collection *mongo.Collection, address_collection *mongo.Collection, captcha_secret string) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         var register_request RegisterRequest
@@ -257,15 +258,15 @@ func Register(collection *mongo.Collection, captcha_secret string) http.Handler 
             return
         }
 
-        email := register_request.Username + "@" + register_request.Domain
+        email := fmt.Sprintf("%s@secria.me", register_request.Username)
 
-        log.Println("Registering user: "+email)
+        log.Println("Registering user:", email)
         filter := bson.D{{Key: "email", Value: email}}
         var user mongo_schemes.User
-        err := collection.FindOne(context.Background(), filter).Decode(&user)
+        err := user_collection.FindOne(context.Background(), filter).Decode(&user)
 
         if err == nil {
-            log.Println("Email already in use, name and domain: "+register_request.Name+", "+register_request.Domain)
+            log.Println("Email already in use, name and domain:", register_request.Name, ",", register_request.Domain)
             responder.WriteError("Email already in use")
             return
         } else if (err != mongo.ErrNoDocuments) {
@@ -280,7 +281,7 @@ func Register(collection *mongo.Collection, captcha_secret string) http.Handler 
 
         resp, err := http.PostForm(CAPTCHA_URL, data)
         if err != nil {
-            log.Println("Captcha failed: "+err.Error())
+            log.Println("Captcha failed:", err.Error())
             responder.WriteError("An error has ocurred")
             return
         }
@@ -288,30 +289,30 @@ func Register(collection *mongo.Collection, captcha_secret string) http.Handler 
 
         var recaptchaResponse RecaptchaResponse
         if err := json.NewDecoder(resp.Body).Decode(&recaptchaResponse); err != nil {
-            log.Println("Captcha failed: "+err.Error())
+            log.Println("Captcha failed:", err.Error())
             responder.WriteError("Captcha failed")
             return
         }
 
-        log.Println("Captcha result: ", recaptchaResponse.Success)
+        log.Println("Captcha result:", recaptchaResponse.Success)
 
         if !recaptchaResponse.Success {
-            log.Println("Captcha failed: "+strings.Join(recaptchaResponse.ErrorCodes, ", "))
+            log.Println("Captcha failed:", strings.Join(recaptchaResponse.ErrorCodes, ", "))
             responder.WriteError("Captcha failed")
         }
 
         hash, err := hashString(register_request.Password)
         if err != nil {
             log.Println("Error hashing password: "+err.Error())
-            responder.WriteError("An error has ocurred")
+            responder.WriteError("Server error")
             return
         }
 
-        _, err = collection.InsertOne(context.Background(), mongo_schemes.User {
+        res, err := user_collection.InsertOne(context.TODO(), mongo_schemes.User {
             Name: register_request.Name,
-            Username: register_request.Username,
-            Domain: register_request.Domain,
-            Email: email,
+            // Username: register_request.Username,
+            // Domain: register_request.Domain,
+            MainEmail: email,
             Password: hash,
             MainKey: mongo_schemes.ECDH_MLKEM_KEY{
                 Key: mongo_schemes.Key{
@@ -330,6 +331,19 @@ func Register(collection *mongo.Collection, captcha_secret string) http.Handler 
             log.Println("Failed to insert user: "+err.Error())
             responder.WriteError("Failed to create user")
             return
+        }
+
+        user_id := res.InsertedID.(primitive.ObjectID)
+
+        address := mongo_schemes.EmailAddress{
+            Address: email,
+            UserId: user_id,
+        }
+
+        _, err = address_collection.InsertOne(context.TODO(), address)
+        if err != nil {
+            log.Println("Failed to insert address:", err.Error())
+            responder.WriteError("Server error")
         }
 
         responder.WriteData("User created")

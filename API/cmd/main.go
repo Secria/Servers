@@ -56,6 +56,7 @@ func main() {
     }
     db := client.Database("Secria");
     user_collection := db.Collection("Users");
+    address_collection := db.Collection("Addresses")
     email_collection := db.Collection("Emails");
     metadata_collection := db.Collection("EmailMetadata");
 
@@ -65,18 +66,19 @@ func main() {
     // /auth
     auth_router := http.NewServeMux()
     auth_router.Handle("POST /login", middleware.AddJsonHeader(auth.Login(user_collection, cookies_redis_client)));
-    auth_router.Handle("POST /register", auth.Register(user_collection, CAPTCHA_SECRET));
+    auth_router.Handle("POST /register", auth.Register(user_collection, address_collection, CAPTCHA_SECRET));
     auth_router.Handle("GET /check", auth.CheckAuth(cookies_redis_client, user_collection));
     auth_router.HandleFunc("GET /logout", auth.Logout)
 
 
     router.Handle("/auth/", http.StripPrefix("/auth", auth_router))
 
-    metadata_size := 1000
+    metadata_kb := 2.44
+    var metadata_size int = int(metadata_kb * 1024.0)
 
     // /user
     required_auth_router := http.NewServeMux()
-    required_auth_router.Handle("POST /add_sub", user.AddSubaddress(user_collection))
+    required_auth_router.Handle("POST /address", user.AddNewAddress(user_collection, address_collection))
     //required_auth_router.Handle("POST /del_sub", user.DeleteSubaddress(user_collection, public_email_collection))
     required_auth_router.Handle("GET /generate", user.GenerateAddContactCode(codes_redis_client))
     required_auth_router.Handle("POST /contacts", user.AddContact(codes_redis_client, user_collection))

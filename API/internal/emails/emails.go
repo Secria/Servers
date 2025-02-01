@@ -16,6 +16,7 @@ import (
 	"secria_api/internal/api_utils"
 	"shared/encryption"
 	"shared/mongo_schemes"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -144,7 +145,7 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
         sent_str, sent := query["sent"]
         starred_str, starred := query["starred"]
         public_str, public := query["public"]
-        subaddress_str, subaddress := query["subaddress"]
+        used_address_str, used_address := query["address"]
         tags_str, tags := query["tag"]
         search_str, search := query["search"]
         _, deleted := query["deleted"]
@@ -160,13 +161,21 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
             skip = 0
         }
 
-
-        filter := bson.D{{ Key: "user_email", Value: user.Email}}
+        var filter bson.D
+        if used_address {
+            if !slices.Contains(user.Addresses, used_address_str[0]) && used_address_str[0] != user.MainEmail {
+                responder.WriteError("Invalid address")
+                return
+            }
+            filter = bson.D{{ Key: "used_address", Value: used_address_str[0]}}
+        } else {
+            filter = bson.D{{ Key: "used_address", Value: user.MainEmail}}
+        }
 
         if (search_by_id) {
             decoded, err := base64.StdEncoding.DecodeString(message_id[0])
             if err != nil {
-                log.Println("Failed to decode base64 message id: "+err.Error())
+                log.Println("Failed to decode base64 message id:", err.Error())
                 responder.WriteError("Malformed request")
                 return
             }
@@ -213,8 +222,8 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
                     filter = append(filter, bson.E{Key: "private", Value: true})
                 }
 
-                if subaddress {
-                    filter = append(filter, bson.E{Key: "subaddress", Value: subaddress_str[0]})
+                if used_address {
+                    filter = append(filter, bson.E{Key: "subaddress", Value: used_address_str[0]})
                 }
             }
 
@@ -294,6 +303,7 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
                 Encryption: email.Encryption,
                 KeyUsed: metadata.KeyUsed,
                 From: email.From,
+                MessageId: metadata.MessageId,
                 Headers: email.Headers,
                 Body: email.Body,
                 CipherText: metadata.Ciphertext,
@@ -364,7 +374,7 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
 
         var send_request SendPrivateRequest 
         if err := json.NewDecoder(r.Body).Decode(&send_request); err != nil {
-            log.Println("Error decoding request: "+err.Error())
+            log.Println("Error decoding request:", err.Error())
             responder.WriteError("Invalid request body")
             return
         }
@@ -379,9 +389,9 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
         cc_emails := filterFunc(func(i int, e EncryptRecipient) bool { return e.CC}, send_request.To)
         
         email_id := primitive.NewObjectID()
-        message_id := fmt.Sprintf("<%s@%s>", email_id.Hex(), user.Domain)
+        message_id := fmt.Sprintf("<%s@secria.me>", email_id.Hex()) // Change when more domains are allowed
 
-        headers := fmt.Sprintf("From: \"%s\" <%s>\r\n", user.Name, user.Email)
+        headers := fmt.Sprintf("From: \"%s\" <%s>\r\n", user.Name, user.MainEmail)
         headers += fmt.Sprintf("To:%s\r\n", list_email_header_format(to_emails))
         if len(cc_emails) != 0 {
             headers += fmt.Sprintf("CC:%s\r\n", list_email_header_format(cc_emails)) // First space is included in the function
@@ -401,11 +411,10 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
 
         email := mongo_schemes.Email{
             Id: email_id,
-            From: user.Email,
+            From: user.MainEmail,
             Encryption: mongo_schemes.Encryption_ECDH_MLKEM,
             Body: send_request.Body,
             Headers: headers,
-            ReferenceCount: len(send_request.To),
         }
 
         email_bson, err := bson.Marshal(email)
@@ -429,13 +438,13 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
 
         list := mapFunc(func(i int, u EncryptRecipient) interface{} {
             m := mongo_schemes.Metadata{
-                UserEmail: u.Email,
+                UsedAddress: u.Email,
                 Size: estimated_size,
                 KeyUsed: u.KeyUsed,
                 EmailID: email_id,
                 Subject: send_request.Subject,
                 MessageId: message_id,
-                From: user.Email,
+                From: user.MainEmail,
                 Private: true,
                 EncryptedKey: u.EncryptedKey,
                 Ciphertext: u.Ciphertext,
@@ -451,7 +460,7 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
 
         _, err = metadata_collection.InsertMany(context.Background(), list)
         if err != nil {
-            log.Println("There was an error creating the email metadata: "+err.Error())
+            log.Println("There was an error creating the email metadata:", err.Error())
             responder.WriteError("Server error")
             return
         }
@@ -540,7 +549,7 @@ func store_owned_messages(ctx context.Context, user_collection *mongo.Collection
         for _, recipient := range recipients {
             found := false
             for _, user := range users {
-                if user.Email == recipient.Email {
+                if user.MainEmail == recipient.Email {
                     recipient_key := user.MainKey
 
                     mlkem_pub_bytes := make([]byte, 0)
@@ -589,9 +598,8 @@ func store_owned_messages(ctx context.Context, user_collection *mongo.Collection
 
 
                     m := mongo_schemes.Metadata{
-                        UserEmail: recipient.Email,
+                        UsedAddress: recipient.Email,
                         KeyUsed: recipient_key.KeyId,
-                        Subaddress: recipient.Subaddress,
                         Ciphertext: ciphertext_encoded,
                         EncryptedKey: encrypted_email_key_encoded,
                     }
@@ -619,7 +627,6 @@ func store_owned_messages(ctx context.Context, user_collection *mongo.Collection
             // Headers: headers,
             Body: encrypted_body_encoded,
             DHPublicKey: dh_throw_pub_encoded,
-            ReferenceCount: len(recipients)+1,
         }
 
         email_res, err := email_collection.InsertOne(ctx, email)
@@ -685,7 +692,7 @@ type SendPublicRequest struct {
     To []string `json:"to"`
     CC []string `json:"cc"`
     BCC []string `json:"bcc"`
-    Subaddress string `json:"key"`
+    Address string `json:"address"`
     Subject string `json:"subject"`
     Body string `json:"body"`
 }
@@ -702,15 +709,9 @@ func SendPublic(users_collection *mongo.Collection, metadata_collection *mongo.C
             return
         }
 
-        found := false;
-        for _, k := range user.Subaddresses {
-            if k == send_request.Subaddress {
-                found = true;
-                break;
-            }
-        }
-        
-        if !found {
+        valid_addresses := append(user.Addresses, user.MainEmail)
+
+        if !slices.Contains(valid_addresses, send_request.Address) {
             log.Println("Subaddress was not found")
             responder.WriteError("Subaddress was not found")
             return
@@ -770,9 +771,10 @@ func SendPublic(users_collection *mongo.Collection, metadata_collection *mongo.C
             }
         }
 
-        from := user.Username + "+" + send_request.Subaddress + "@" + user.Domain;
+        // from := user.Username + "+" + send_request.Address + "@" + user.Domain;
+        from := user.MainEmail // This is wrong
 
-        headers := "From: " + user.Email + "\r\n"
+        headers := "From: " + send_request.Address + "\r\n"
         headers += "To" + strings.Join(send_request.To, ", ") + "\r\n"
         headers += "CC" + strings.Join(send_request.CC, ", ") + "\r\n"
         headers += "Subject" + send_request.Subject + "\r\n"
@@ -996,7 +998,7 @@ func DeleteEmails(metadata_collection *mongo.Collection) http.Handler {
         }
 
         filter := bson.D{
-            {Key: "user_email", Value: user.Email},
+            {Key: "user_email", Value: user.MainEmail},
             {Key: "_id", Value: bson.M{
                 "$in": delete_email_request.EmailID,
             }},

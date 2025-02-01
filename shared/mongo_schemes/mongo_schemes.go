@@ -30,7 +30,7 @@ type UserPlansConfig struct {
     Price float64 `bson:"price"`
     SpaceLimit int `bson:"space_limit"`
     DailyEmailLimit int `bson:"daily_limit"`
-    SubaddressLimit int `bson:"subaddress_limit"`
+    AddressLimit int `bson:"address_limit"`
     TagLimit int `bson:"tag_limit"`
 }
 
@@ -39,13 +39,19 @@ type TrackedUsage struct {
     SentEmails int `bson:"sent_email"`
 }
 
+type EmailAddress struct {
+    Address string `bson:"address"`
+    UserId primitive.ObjectID `bson:"user_id"`
+}
+
 type User struct {
     Id primitive.ObjectID `bson:"_id,omitempty" json:"id"`
     Name string `bson:"name" json:"name"`
-    Email string `bson:"email" json:"email"`
-    Username string `bson:"username" json:"username"`
-    Domain string `bson:"domain" json:"domain"`
-    Subaddresses []string `bson:"subaddresses,omitempty" json:"subaddresses"`
+    MainEmail string `bson:"email" json:"email"`
+    // Username string `bson:"username" json:"username"`
+    // Domain string `bson:"domain" json:"domain"`
+    Addresses []string `bson:"addresses,omitempty" json:"addresses"`
+    // Subaddresses []string `bson:"subaddresses,omitempty" json:"subaddresses"`
     Password string `bson:"password" json:"-"`
     MainKey ECDH_MLKEM_KEY `bson:"main_key" json:"main_key"`
     Contacts []string `bson:"contacts,omitempty" json:"contacts"`
@@ -58,7 +64,8 @@ type Metadata struct {
     Id primitive.ObjectID `bson:"_id,omitempty"`
     Size int `bson:"size"`
     KeyUsed string `bson:"key_used"`
-    UserEmail string `bson:"user_email"`
+    // UserEmail string `bson:"user_email"`
+    UsedAddress string `bson:"used_address"`
     EmailID primitive.ObjectID `bson:"email_id"`
     MessageId string `bson:"message_id" json:"message_id"`
     Subject string `bson:"subject,omitempty"`
@@ -83,5 +90,4 @@ type Email struct {
     Headers string `bson:"headers" json:"headers"`
     Body string `bson:"body" json:"body"`
     DHPublicKey string `bson:"dh_public,omitempty"`
-    ReferenceCount int `bson:"reference_count" json:"reference_count"`
 }

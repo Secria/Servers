@@ -192,27 +192,30 @@ func (s *Session) Data(r io.Reader) error {
     var to_ids []primitive.ObjectID
     for i := range s.To {
         user := &s.To[i]
-        to_ids = append(to_ids, user.Id)
-        ev, err := encryption.GenerateEncryptedKey(encryption_key, s.Backend.DHPrivateKey, &user.User)
-        if err != nil {
-            log.Println("Something failed when encrypting the email", err.Error())
-            return fmt.Errorf("There was an error encrypting the emails")
-        }
+        
+        if user.Usage.UsedSpace < user.PlanConfig.SpaceLimit {
+            to_ids = append(to_ids, user.Id)
+            ev, err := encryption.GenerateEncryptedKey(encryption_key, s.Backend.DHPrivateKey, &user.User)
+            if err != nil {
+                log.Println("Something failed when encrypting the email", err.Error())
+                return fmt.Errorf("There was an error encrypting the emails")
+            }
 
-        m := mongo_schemes.Metadata{
-            Size: estimated_size,
-            KeyUsed: ev.UsedKey,
-            UsedAddress: user.Address,
-            EmailID: inserted_id,
-            MessageId: message_id,
-            Subject: subject,
-            From: s.From,
-            Ciphertext: ev.CipherText,
-            EncryptedKey: ev.SecondStageKey,
-            Private: false,
-        }
+            m := mongo_schemes.Metadata{
+                Size: estimated_size,
+                KeyUsed: ev.UsedKey,
+                UsedAddress: user.Address,
+                EmailID: inserted_id,
+                MessageId: message_id,
+                Subject: subject,
+                From: s.From,
+                Ciphertext: ev.CipherText,
+                EncryptedKey: ev.SecondStageKey,
+                Private: false,
+            }
 
-        metadata = append(metadata, m)
+            metadata = append(metadata, m)
+        }
     }
 
     _, err = s.Backend.MetadataCollection.InsertMany(context.TODO(), metadata)

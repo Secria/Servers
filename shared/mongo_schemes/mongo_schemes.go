@@ -1,6 +1,10 @@
 package mongo_schemes
 
-import "go.mongodb.org/mongo-driver/bson/primitive"
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
 
 type UserTag struct {
     Name string `bson:"name" json:"name"`
@@ -25,18 +29,19 @@ type ECDH_MLKEM_KEY struct {
     Key
 }
 
-type UserPlansConfig struct {
-    Plan string `bson:"plan"`
-    Price float64 `bson:"price"`
-    SpaceLimit int `bson:"space_limit"`
-    DailyEmailLimit int `bson:"daily_limit"`
-    AddressLimit int `bson:"address_limit"`
-    TagLimit int `bson:"tag_limit"`
+type UserPlanConfig struct {
+    Plan string `bson:"plan" json:"plan"`
+    Price float64 `bson:"price" json:"price"`
+    SpaceLimit int `bson:"space_limit" json:"space_limit"`
+    DailyEmailLimit int `bson:"daily_limit" json:"daily_limit"`
+    AddressLimit int `bson:"address_limit" json:"address_limit"`
+    TagLimit int `bson:"tag_limit" json:"tag_limit"`
 }
 
 type TrackedUsage struct {
-    UsedSpace int `bson:"used_space"`
-    SentEmails int `bson:"sent_email"`
+    UsedSpace int `bson:"used_space" json:"used_space"`
+    SentEmails int `bson:"sent_emails" json:"sent_emails"`
+    ResetDate time.Time `bson:"reset_date"`
 }
 
 type EmailAddress struct {
@@ -56,8 +61,8 @@ type User struct {
     MainKey ECDH_MLKEM_KEY `bson:"main_key" json:"main_key"`
     Contacts []string `bson:"contacts,omitempty" json:"contacts"`
     Tags []UserTag `bson:"tags,omitempty" json:"tags"`
-    PlansConfig UserPlansConfig `bson:"plan_config"`
-    Usage TrackedUsage `bson:"usage"`
+    PlanConfig UserPlanConfig `bson:"plan_config" json:"plan_config"`
+    Usage TrackedUsage `bson:"usage" json:"usage"`
 }
 
 type Metadata struct {

@@ -372,6 +372,11 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
 
+        if user.Usage.SentEmails >= user.PlanConfig.DailyEmailLimit {
+            responder.WriteError("Exceeded daily emails sent")
+            return
+        }
+
         var send_request SendPrivateRequest 
         if err := json.NewDecoder(r.Body).Decode(&send_request); err != nil {
             log.Println("Error decoding request:", err.Error())
@@ -468,7 +473,18 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
         user_emails := mapFunc(func(i int, u EncryptRecipient) string { return u.Email }, send_request.To)
 
         filter := bson.D{{Key: "email", Value: bson.M{"$in": user_emails}}}
-        update := bson.D{{Key: "$inc", Value: bson.M{"usage.used_space": estimated_size}}}
+        update := bson.D{
+            {Key: "$inc", Value: bson.M{"usage.used_space": estimated_size}},
+        }
+
+        sent_emails_today := user.Usage.SentEmails + 1
+        if time.Now().After(user.Usage.ResetDate) {
+            sent_emails_today = 1
+            update = append(update, bson.E{Key: "$set", Value: bson.M{"usage.sent_emails": sent_emails_today}})
+            now := time.Now().UTC()
+            update = append(update, bson.E{Key: "$set", Value: bson.M{"usage.reset_date": time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())}})
+        }
+
         _, err = users_collection.UpdateMany(context.TODO(), filter, update)
 
         if err != nil {

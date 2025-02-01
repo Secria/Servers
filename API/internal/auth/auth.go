@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"regexp"
 	"secria_api/internal/api_utils"
+	"secria_api/internal/plans_handler"
 	"secria_api/internal/redis_handler"
 	"shared/mongo_schemes"
 	"strings"
@@ -236,7 +237,7 @@ func check_valid_domain(domain string) bool {
 
 const CAPTCHA_URL = "https://www.google.com/recaptcha/api/siteverify"
 
-func Register(user_collection *mongo.Collection, address_collection *mongo.Collection, captcha_secret string) http.Handler {
+func Register(env string, user_collection *mongo.Collection, address_collection *mongo.Collection, captcha_secret string) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         var register_request RegisterRequest
@@ -247,13 +248,13 @@ func Register(user_collection *mongo.Collection, address_collection *mongo.Colle
         }
 
         if !check_valid_domain(register_request.Domain) {
-            log.Println("Invalid domain: "+register_request.Domain)
+            log.Println("Invalid domain:", register_request.Domain)
             responder.WriteError("Invalid domain")
             return
         }
 
         if !check_valid_username(register_request.Username) {
-            log.Println("Invalid username: "+register_request.Username)
+            log.Println("Invalid username:", register_request.Username)
             responder.WriteError("Invalid username")
             return
         }
@@ -275,30 +276,32 @@ func Register(user_collection *mongo.Collection, address_collection *mongo.Colle
             return
         }
 
-        data := url.Values{}
-        data.Set("secret", captcha_secret)
-        data.Set("response", register_request.Captcha)
+        if env != "DEV" {
+            data := url.Values{}
+            data.Set("secret", captcha_secret)
+            data.Set("response", register_request.Captcha)
 
-        resp, err := http.PostForm(CAPTCHA_URL, data)
-        if err != nil {
-            log.Println("Captcha failed:", err.Error())
-            responder.WriteError("An error has ocurred")
-            return
-        }
-        defer resp.Body.Close()
+            resp, err := http.PostForm(CAPTCHA_URL, data)
+            if err != nil {
+                log.Println("Captcha failed:", err.Error())
+                responder.WriteError("An error has ocurred")
+                return
+            }
+            defer resp.Body.Close()
 
-        var recaptchaResponse RecaptchaResponse
-        if err := json.NewDecoder(resp.Body).Decode(&recaptchaResponse); err != nil {
-            log.Println("Captcha failed:", err.Error())
-            responder.WriteError("Captcha failed")
-            return
-        }
+            var recaptchaResponse RecaptchaResponse
+            if err := json.NewDecoder(resp.Body).Decode(&recaptchaResponse); err != nil {
+                log.Println("Captcha failed:", err.Error())
+                responder.WriteError("Captcha failed")
+                return
+            }
 
-        log.Println("Captcha result:", recaptchaResponse.Success)
+            log.Println("Captcha result:", recaptchaResponse.Success)
 
-        if !recaptchaResponse.Success {
-            log.Println("Captcha failed:", strings.Join(recaptchaResponse.ErrorCodes, ", "))
-            responder.WriteError("Captcha failed")
+            if !recaptchaResponse.Success {
+                log.Println("Captcha failed:", strings.Join(recaptchaResponse.ErrorCodes, ", "))
+                responder.WriteError("Captcha failed")
+            }
         }
 
         hash, err := hashString(register_request.Password)
@@ -325,10 +328,11 @@ func Register(user_collection *mongo.Collection, address_collection *mongo.Colle
                 DHPrivateKey: register_request.DHPrivateKey,
                 SentKey: register_request.SentKey,
             },
+            PlanConfig: plans_handler.FreePlanOptions,
         })
 
         if err != nil {
-            log.Println("Failed to insert user: "+err.Error())
+            log.Println("Failed to insert user:", err.Error())
             responder.WriteError("Failed to create user")
             return
         }

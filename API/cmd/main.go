@@ -66,7 +66,7 @@ func main() {
     // /auth
     auth_router := http.NewServeMux()
     auth_router.Handle("POST /login", middleware.AddJsonHeader(auth.Login(user_collection, cookies_redis_client)));
-    auth_router.Handle("POST /register", auth.Register(user_collection, address_collection, CAPTCHA_SECRET));
+    auth_router.Handle("POST /register", auth.Register(ENV, user_collection, address_collection, CAPTCHA_SECRET));
     auth_router.Handle("GET /check", auth.CheckAuth(cookies_redis_client, user_collection));
     auth_router.HandleFunc("GET /logout", auth.Logout)
 

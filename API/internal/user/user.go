@@ -196,6 +196,11 @@ func AddNewAddress(user_collection *mongo.Collection, address_collection *mongo.
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
 
+        if len(user.Addresses) >= user.PlanConfig.AddressLimit {
+            responder.WriteError("You can't add more addresses to your current plan")
+            return
+        }
+
         var add_address_request string
         if err := json.NewDecoder(r.Body).Decode(&add_address_request); err != nil {
             log.Println("Failed to parse edit keys request:", err.Error())

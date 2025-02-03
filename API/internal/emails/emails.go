@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"secria_api/internal/api_utils"
 	"shared/encryption"
 	"shared/mongo_schemes"
@@ -221,10 +222,6 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
                 } else {
                     filter = append(filter, bson.E{Key: "private", Value: true})
                 }
-
-                if used_address {
-                    filter = append(filter, bson.E{Key: "subaddress", Value: used_address_str[0]})
-                }
             }
 
             if tags {
@@ -338,6 +335,8 @@ type SendPrivateRequest struct {
     To []EncryptRecipient `json:"to"`
     Subject string `json:"subject"`
     Body string `json:"body"`
+    ContentType string `json:"content_type"`
+    Boundary string `json:"boundary"`
     InReplyTo string `json:"in_reply_to"`
     References string `json:"references"`
 }
@@ -365,6 +364,12 @@ func list_email_header_format(recipients []EncryptRecipient) string {
         }
     }
     return result
+}
+
+var boundary_regex = regexp.MustCompile("[0-9a-f]{24}")
+
+func check_valid_boundary(boundary string) bool {
+    return boundary_regex.Match([]byte(boundary))
 }
 
 func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, metadata_size *int) http.Handler {
@@ -414,6 +419,15 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
             }
         }
 
+        if !check_valid_boundary(send_request.Boundary) {
+            responder.WriteError("Bad boundary format")
+            return
+        }
+
+        if send_request.ContentType == "multipart/mixed" || send_request.ContentType == "multipart/alternative" {
+            headers += fmt.Sprintf("Content-Type: %s; boundary=%s", send_request.ContentType, send_request.Boundary)
+        }
+
         email := mongo_schemes.Email{
             Id: email_id,
             From: user.MainEmail,
@@ -424,7 +438,7 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
 
         email_bson, err := bson.Marshal(email)
         if err != nil {
-            log.Println("There was an error creating the email: "+err.Error())
+            log.Println("There was an error creating the email:", err.Error())
             responder.WriteError("Server error")
             return
         }
@@ -477,6 +491,16 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
             {Key: "$inc", Value: bson.M{"usage.used_space": estimated_size}},
         }
 
+        // Update other users
+        _, err = users_collection.UpdateMany(context.TODO(), filter, update)
+
+        if err != nil {
+            log.Println("Error updating used size:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        // Update sending user
         sent_emails_today := user.Usage.SentEmails + 1
         if time.Now().After(user.Usage.ResetDate) {
             sent_emails_today = 1
@@ -485,7 +509,7 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
             update = append(update, bson.E{Key: "$set", Value: bson.M{"usage.reset_date": time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())}})
         }
 
-        _, err = users_collection.UpdateMany(context.TODO(), filter, update)
+        _, err = users_collection.UpdateByID(context.TODO(), user.Id, update)
 
         if err != nil {
             log.Println("Error updating used size:", err.Error())

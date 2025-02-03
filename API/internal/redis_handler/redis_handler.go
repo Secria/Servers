@@ -24,14 +24,14 @@ type CookieObject struct {
 func GetCookieObject(redis_client *redis.Client, cookie_value string) (CookieObject, error) {
     cookie_string, err := redis_client.Get(context.Background(), cookie_value).Result()
     if err != nil {
-        log.Println("Failed to get session cookie: "+err.Error())
+        log.Println("Failed to get session cookie: ", err.Error())
         return CookieObject{}, err
     }
 
     var cookie_object CookieObject
     err = json.Unmarshal([]byte(cookie_string), &cookie_object)
     if err != nil {
-        log.Println("Failed to get session cookie: "+err.Error())
+        log.Println("Failed to get session cookie: ", err.Error())
         return CookieObject{}, err
     }
     

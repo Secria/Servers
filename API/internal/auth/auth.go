@@ -14,6 +14,7 @@ import (
 	"secria_api/internal/api_utils"
 	"secria_api/internal/plans_handler"
 	"secria_api/internal/redis_handler"
+	"secria_api/internal/totp"
 	"shared/mongo_schemes"
 	"strings"
 	"time"
@@ -77,35 +78,9 @@ type LoginRequest struct {
     Password string `json:"password"`
 }
 
-func retrieveContacts(ctx context.Context, user_collection *mongo.Collection, emails []string) ([]api_utils.ContactResponse, error) {
-    filter := bson.M{"email": bson.M{"$in": emails}}
-    cur, err := user_collection.Find(ctx, filter)
-    if err != nil {
-        return nil, err
-    }
-    defer cur.Close(context.Background())
-
-    var users []mongo_schemes.User
-    if err = cur.All(context.Background(), &users); err != nil {
-        return nil, err
-    }
-
-    var contacts []api_utils.ContactResponse = make([]api_utils.ContactResponse, 0, len(emails)) 
-    for _, u := range users {
-        contacts = append(contacts, api_utils.ContactResponse{Name: u.Name, Email: u.MainEmail, MLKEMPublicKey: u.MainKey.MLKEMPublicKey, DHPublicKey: u.MainKey.DHPublicKey})
-    }
-
-    return contacts, nil
-}
-
-type LoginResponse struct {
-    User mongo_schemes.User `json:"user"`
-    Contacts []api_utils.ContactResponse `json:"contacts"`
-}
-
-func Login(user_collection *mongo.Collection, redis_client *redis.Client) http.Handler {
+func Login(user_collection *mongo.Collection, cookie_redis_client *redis.Client, mfa_attempts_redis_client *redis.Client) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        responder := api_utils.NewJsonResponder[LoginResponse](w)
+        responder := api_utils.NewJsonResponder[api_utils.LoginResponse](w)
         var login_request LoginRequest
         if err := json.NewDecoder(r.Body).Decode(&login_request); err != nil {
             log.Println("Error decoding request:", err.Error())
@@ -130,11 +105,34 @@ func Login(user_collection *mongo.Collection, redis_client *redis.Client) http.H
             return
         }
 
-        log.Println("User logged in: "+login_request.Email)
+        if user.TOTPActive {
+            _, err := mfa_attempts_redis_client.Get(context.TODO(), user.Id.Hex()).Result()
+            if err == redis.Nil {
+                attempt := totp.StoredMfaAttempt{
+                    Request: "login",
+                    Attempts: 0,
+                }
+                encoded_attempt, err := json.Marshal(attempt)
+                if err != nil {
+                    log.Println("Error marshaling mfa attempt: ", err.Error())
+                    responder.WriteError("Server error")
+                    return
+                }
+                mfa_attempts_redis_client.Set(context.TODO(), user.Id.Hex(), string(encoded_attempt), time.Minute * 5)
+            } else if err != nil {
+                log.Println("Error retrieving stored attempt", err.Error())
+                responder.WriteError("Server error")
+                return
+            }
+            responder.WriteError("MFA")
+            return
+        }
 
-        cookie, err := redis_handler.GenerateCookie(redis_client, user.Id)
+        log.Println("User logged in: ", login_request.Email)
+
+        cookie, err := redis_handler.GenerateCookie(cookie_redis_client, user.Id)
         if err != nil {
-            log.Println("There was an error generating the cookie: "+err.Error())
+            log.Println("There was an error generating the cookie: ", err.Error())
             responder.WriteError("Authentication failed")
             return
         }
@@ -142,21 +140,21 @@ func Login(user_collection *mongo.Collection, redis_client *redis.Client) http.H
         http.SetCookie(w, &cookie)
 
         if user.Contacts == nil {
-            responder.WriteData(LoginResponse{
+            responder.WriteData(api_utils.LoginResponse{
                 User: user,
                 Contacts: []api_utils.ContactResponse{},
             })
             return
         }
 
-        contacts, err := retrieveContacts(context.Background(), user_collection, user.Contacts)
+        contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
         if err != nil {
-            log.Println("There was an error retrieving the contacts: "+err.Error())
+            log.Println("There was an error retrieving the contacts: ", err.Error())
             responder.WriteError("Authentication failed")
             return
         }
 
-        responder.WriteData(LoginResponse{
+        responder.WriteData(api_utils.LoginResponse{
             User: user,
             Contacts: contacts,
         })
@@ -165,7 +163,7 @@ func Login(user_collection *mongo.Collection, redis_client *redis.Client) http.H
 
 func CheckAuth(redis_client *redis.Client, user_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        responder := api_utils.NewJsonResponder[LoginResponse](w)
+        responder := api_utils.NewJsonResponder[api_utils.LoginResponse](w)
         session_cookie, err := r.Cookie("session")
         if err != nil {
             log.Println("Check auth failed:", err.Error())
@@ -183,21 +181,21 @@ func CheckAuth(redis_client *redis.Client, user_collection *mongo.Collection) ht
         }
 
         if user.Contacts == nil {
-            responder.WriteData(LoginResponse{
+            responder.WriteData(api_utils.LoginResponse{
                 User: user,
                 Contacts: []api_utils.ContactResponse{},
             })
             return
         }
 
-        contacts, err := retrieveContacts(context.Background(), user_collection, user.Contacts)
+        contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
         if err != nil {
             log.Println("There was an error retrieving the contacts:", err.Error())
             responder.WriteError("Authentication failed")
             return
         }
 
-        responder.WriteData(LoginResponse{
+        responder.WriteData(api_utils.LoginResponse{
             User: user,
             Contacts: contacts,
         })

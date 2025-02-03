@@ -63,6 +63,8 @@ type User struct {
     Tags []UserTag `bson:"tags,omitempty" json:"tags"`
     PlanConfig UserPlanConfig `bson:"plan_config" json:"plan_config"`
     Usage TrackedUsage `bson:"usage" json:"usage"`
+    TOTPActive bool `bson:"totp_active,omitempty" json:"totp_active,omitempty"`
+    TOTPSecret string `bson:"totp_secret,omitempty" json:"-"`
 }
 
 type Metadata struct {

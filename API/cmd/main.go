@@ -101,14 +101,15 @@ func main() {
     // /user
     required_auth_router := http.NewServeMux()
     required_auth_router.Handle("POST /address", user.AddNewAddress(user_collection, address_collection))
-    //required_auth_router.Handle("POST /del_sub", user.DeleteSubaddress(user_collection, public_email_collection))
+    required_auth_router.Handle("POST /delete_address", user.DeleteAddress(user_collection, address_collection))
+    required_auth_router.Handle("POST /rotate", user.RotateAddress(user_collection, address_collection))
     required_auth_router.Handle("GET /generate", user.GenerateAddContactCode(share_codes_redis_client))
     required_auth_router.Handle("POST /contacts", user.AddContact(share_codes_redis_client, user_collection))
     required_auth_router.Handle("POST /tags", user.AddUserTag(user_collection))
 
     required_auth_router.Handle("POST /send_private", emails.SendPrivate(user_collection, metadata_collection, email_collection, &metadata_size))
     required_auth_router.Handle("POST /send_public", emails.SendPublic(user_collection, metadata_collection, email_collection))
-    required_auth_router.Handle("GET /retrieve_private", emails.QueryEmails(metadata_collection, email_collection))
+    required_auth_router.Handle("GET /query", emails.QueryEmails(metadata_collection, email_collection))
 
     required_auth_router.Handle("POST /read", emails.MarkEmailsRead(metadata_collection))
     required_auth_router.Handle("POST /star", emails.StarEmails(metadata_collection))

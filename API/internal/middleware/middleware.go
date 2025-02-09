@@ -35,7 +35,7 @@ func (w *wrappedWriter) WriteHeader(statusCode int) {
 
 func Logging(next http.Handler) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        start := time.Now()
+        start := time.Now().UTC()
 
         wrapped := wrappedWriter{
             ResponseWriter: w,
@@ -75,7 +75,7 @@ func CookieAuth(redis_client *redis.Client, user_collection *mongo.Collection) M
                 return
             }
 
-            if !cookie_object.NoRefresh && cookie_refresh.Before(time.Now()) {
+            if !cookie_object.NoRefresh && cookie_refresh.Before(time.Now().UTC()) {
                 new_cookie, err := redis_handler.RegenerateCookie(redis_client, session_cookie.Value, cookie_object)
                 if err != nil {
                     http.Error(w, "Server Error", http.StatusInternalServerError)

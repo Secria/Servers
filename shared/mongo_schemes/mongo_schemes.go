@@ -12,7 +12,7 @@ type UserTag struct {
 }
 
 type Key struct {
-    KeyId string `bson:"key_id" json:"key_id"`
+    KeyId []byte `bson:"key_id" json:"key_id"`
     Encryption int `bson:"encryption" json:"encryption"`
 }
 
@@ -21,12 +21,17 @@ const (
 )
 
 type ECDH_MLKEM_KEY struct {
-    MLKEMPublicKey string `bson:"mlkem_public_key" json:"mlkem_public_key"`
-    MLKEMPrivateKey string `bson:"mlkem_private_key_encrypted" json:"mlkem_private_key_encrypted"`
-    DHPublicKey string `bson:"dh_public_key" json:"dh_public_key"`
-    DHPrivateKey string `bson:"dh_private_key_encrypted" json:"dh_private_key_encrypted"`
-    SentKey string `bson:"sent_key" json:"sent_key"`
+    MLKEMPublicKey []byte `bson:"mlkem_public_key" json:"mlkem_public_key"`
+    MLKEMPrivateKey []byte `bson:"mlkem_private_key_encrypted" json:"mlkem_private_key_encrypted"`
+    DHPublicKey []byte `bson:"dh_public_key" json:"dh_public_key"`
+    DHPrivateKey []byte `bson:"dh_private_key_encrypted" json:"dh_private_key_encrypted"`
+    SentKey []byte `bson:"sent_key" json:"sent_key"`
     Key
+}
+
+type EncryptionMetadata struct {
+    From primitive.ObjectID `bson:"from"`
+    To primitive.ObjectID `bson:"to"`
 }
 
 type UserPlanConfig struct {
@@ -39,53 +44,44 @@ type UserPlanConfig struct {
 }
 
 type TrackedUsage struct {
+    Id primitive.ObjectID `bson:"_id,omitempty"`
+    Email string `bson:"email"`
     UsedSpace int `bson:"used_space" json:"used_space"`
     SentEmails int `bson:"sent_emails" json:"sent_emails"`
     ResetDate time.Time `bson:"reset_date"`
-}
-
-type EmailAddress struct {
-    Address string `bson:"address"`
-    UserId primitive.ObjectID `bson:"user_id"`
 }
 
 type User struct {
     Id primitive.ObjectID `bson:"_id,omitempty" json:"id"`
     Name string `bson:"name" json:"name"`
     MainEmail string `bson:"email" json:"email"`
-    // Username string `bson:"username" json:"username"`
-    // Domain string `bson:"domain" json:"domain"`
-    Addresses []string `bson:"addresses,omitempty" json:"addresses"`
-    // Subaddresses []string `bson:"subaddresses,omitempty" json:"subaddresses"`
+    Addresses []string `bson:"addresses" json:"addresses"`
     Password string `bson:"password" json:"-"`
     MainKey ECDH_MLKEM_KEY `bson:"main_key" json:"main_key"`
     Contacts []string `bson:"contacts,omitempty" json:"contacts"`
     Tags []UserTag `bson:"tags,omitempty" json:"tags"`
     PlanConfig UserPlanConfig `bson:"plan_config" json:"plan_config"`
-    Usage TrackedUsage `bson:"usage" json:"usage"`
+    Usage primitive.ObjectID `bson:"usage" json:"usage"`
     TOTPActive bool `bson:"totp_active,omitempty" json:"totp_active,omitempty"`
     TOTPSecret string `bson:"totp_secret,omitempty" json:"-"`
 }
 
 type Metadata struct {
     Id primitive.ObjectID `bson:"_id,omitempty"`
-    Size int `bson:"size"`
-    KeyUsed string `bson:"key_used"`
-    // UserEmail string `bson:"user_email"`
+    Size int64 `bson:"size"`
+    KeyUsed []byte `bson:"key_used"`
+    EncryptedKey []byte `bson:"encrypted_key"`
+    Ciphertext[]byte `bson:"mlkem_cipher"`
     UsedAddress string `bson:"used_address"`
     EmailID primitive.ObjectID `bson:"email_id"`
     MessageId string `bson:"message_id" json:"message_id"`
     Subject string `bson:"subject,omitempty"`
     From string `bson:"from"`
-    Ciphertext string `bson:"ciphertext,omitempty"`
-    EncryptedKey string `bson:"encrypted_key"`
     Private bool `bson:"private"`
-    // Subaddress string `bson:"subaddress,omitempty"`
     Sent bool `bson:"sent,omitempty"`
     Read bool `bson:"read,omitempty"`
     Starred bool `bson:"starred,omitempty"`
     Archived bool `bson:"archived,omitempty"`
-    BCC bool `bson:"bcc,omitempty"`
     Tags []string `bson:"tags,omitempty"`
     Deleted bool `bson:"deleted,omitempty"`
 }
@@ -93,8 +89,9 @@ type Metadata struct {
 type Email struct {
     Id primitive.ObjectID `bson:"_id,omitempty" json:"id"`
     Encryption int `bson:"encryption" json:"encryption"`
+    DHPublicKey []byte `bson:"dh_public"`
     From string `bson:"from" json:"from"`
+    FromId primitive.ObjectID `bson:"from_id"`
     Headers string `bson:"headers" json:"headers"`
-    Body string `bson:"body" json:"body"`
-    DHPublicKey string `bson:"dh_public,omitempty"`
+    Body []byte `bson:"body" json:"body"`
 }

@@ -1,12 +1,7 @@
 package emails
 
 import (
-	"bytes"
 	"context"
-	"crypto/ecdh"
-	"crypto/mlkem"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,127 +10,29 @@ import (
 	"net/http"
 	"regexp"
 	"secria_api/internal/api_utils"
-	"shared/encryption"
 	"shared/mongo_schemes"
+    "shared/usage"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/emersion/go-smtp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type Tuple[T any,V any] struct {
-    first T
-    second V
+type EmailDBResponse struct {
+    Metadata mongo_schemes.Metadata `bson:"metadata"`
+    Email mongo_schemes.Email `bson:"email"`
 }
 
-func forEach[T any](function func(index int, value T), elements []T) {
-    for i, v := range elements {
-        function(i, v)
-    }
+type QueryDBResponse struct {
+    Data []EmailDBResponse `bson:"data"`
+    Count int `bson:"count"`
 }
 
-func mapFunc[T any,R any](function func(index int, value T) R, elements []T) []R {
-    list := make([]R, len(elements))
-    for i, v := range elements {
-        list[i] = function(i, v)
-    }
-    return list
-}
-
-func mapFuncWithError[T any,R any](function func(index int, value T) (R, error), elements []T) ([]R, error) {
-    list := make([]R, len(elements))
-    for i, v := range elements {
-        r, err := function(i, v)
-        if err != nil {
-            return nil, err
-        }
-        list[i] = r
-    }
-    return list, nil
-}
-
-func filterFunc[T any](function func(index int, value T) bool, elements []T) []T {
-    list := make([]T, 0)
-    for i, v := range elements {
-        if function(i, v) {
-            list = append(list, v)
-        }
-    }
-    return list
-}
-
-func indexOf[T any](function func(index int, value T) bool, elements []T) int {
-    for i, v := range elements {
-        if function(i, v) {
-            return i
-        }
-    }
-    return -1
-}
-
-func sliceContains[T comparable](value T, elements []T) bool {
-    if indexOf(func(_ int, v T) bool {return v == value}, elements) == -1 {
-        return false
-    }
-    return true
-}
-
-func pairBy[T any,V any](first []T, second []V, function func(T,V) bool) []Tuple[T,V] {
-    result := make([]Tuple[T,V], len(first))
-    for i, f := range first {
-        for _, s := range second {
-            if function(f, s) {
-                result[i] = Tuple[T, V]{f, s}
-            }
-        }
-    }
-    return result
-}
-
-func groupBy[T any, R comparable](function func(index int, value T) R, elements []T) map[R][]T {
-    result := make(map[R][]T)
-    for i, v := range elements {
-        k := function(i, v)
-        if result[k] == nil {
-            result[k] = make([]T, 0)
-        }
-        result[k] = append(result[k], v)
-    }
-    return result
-}
-
-func sliceDistinct[T comparable](elements []T) []T {
-    result := make([]T, 0)
-    for _, v := range elements {
-        if !sliceContains(v, result) {
-            result = append(result, v)
-        }
-    }
-    return result
-}
-
-func groupByWithError[T any, R comparable](function func(index int, value T) (R, error), elements []T) (map[R][]T, error) {
-    result := make(map[R][]T)
-    for i, v := range elements {
-        k, e := function(i, v)
-        if e != nil {
-            return nil, e
-        }
-        if result[k] == nil {
-            result[k] = make([]T, 0)
-        }
-        result[k] = append(result[k], v)
-    }
-    return result, nil
-}
-
-func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.Collection) http.Handler {
+func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[[]api_utils.ResponseEmail](w)
         user := r.Context().Value("user").(mongo_schemes.User)
@@ -231,7 +128,7 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
             if search {
                 decoded_search, err := base64.StdEncoding.DecodeString(search_str[0])
                 if err != nil {
-                    log.Println("Bad search string data: "+err.Error())
+                    log.Println("Bad search string data: ", err.Error())
                     responder.WriteError("Malformed request")
                     return
                 }
@@ -241,12 +138,36 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
             }
         }
 
-        findOptions := options.Find()
-        findOptions.SetSort(bson.D{{ Key: "_id", Value: 1 }})
-        findOptions.SetLimit(int64(count))
-        findOptions.SetSkip(int64(skip))
+        match_stage := bson.D{{Key: "$match", Value: filter}}
+        sort_stage := bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}}
+        replace_stage := bson.D{{Key: "$replaceRoot", Value: bson.M{
+            "newRoot": bson.M{
+                "metadata": "$$ROOT",
+            },
+        }}}
+        lookup_stage := bson.D{{Key: "$lookup", Value: bson.M{
+            "from": "Emails",
+            "localField": "metadata.email_id",
+            "foreignField": "_id",
+            "as": "email",
+        }}}
+        cleanup_stage := bson.D{{Key: "$set", Value: bson.M{"email": bson.M{"$arrayElemAt": bson.A{"$email", 0}}}}}
+        separate_calc_stage := bson.D{{Key: "$facet", Value: bson.M{
+            "data": bson.A{
+                bson.D{{Key: "$skip", Value: skip}},
+                bson.D{{Key: "$limit", Value: count}},
+            },
+            "count": bson.A{
+                bson.D{{Key: "$count", Value: "count"}},
+            },
+        }}}
+        replace_count_stage := bson.D{{Key: "$set", Value: bson.M{
+            "count": bson.M{
+                "$arrayElemAt": bson.A{"$count.count", 0},
+            },
+        }}}
+        cur, err := metadata_collection.Aggregate(context.TODO(), mongo.Pipeline{match_stage, sort_stage, replace_stage, lookup_stage, cleanup_stage, separate_calc_stage, replace_count_stage})
 
-        cur, err := metadata_collection.Find(context.TODO(), filter, findOptions)
         if err != nil {
             log.Println("Error retrieving user emails:", err.Error())
             responder.WriteError("Error retrieving emails")
@@ -254,87 +175,63 @@ func QueryEmails(metadata_collection *mongo.Collection,email_collection *mongo.C
         }
         defer cur.Close(context.TODO())
 
-        found_count, err := metadata_collection.CountDocuments(context.TODO(), filter)
-        if err != nil {
-            log.Println("Error decoding emails", err.Error())
-            responder.WriteError("Error retrieving emails")
-            return
-        }
+        var emails_response QueryDBResponse
 
-        var metadata []mongo_schemes.Metadata = make([]mongo_schemes.Metadata, 0)
-        if err := cur.All(context.TODO(), &metadata); err != nil {
-            log.Println("Error decoding emails:", err.Error())
-            responder.WriteError("Error retrieving emails")
-            return
-        }
-
-        email_id := mapFunc(func(i int, v mongo_schemes.Metadata) primitive.ObjectID {
-            return v.EmailID
-        }, metadata)
-
-        email_filter := bson.D{{Key: "_id", Value: bson.M{"$in": email_id}}}
-        n_cur, err := email_collection.Find(context.Background(), email_filter)
-        if err != nil {
-            log.Println("Error retrieving user emails: "+err.Error())
-            responder.WriteError("Error retrieving emails")
-            return
-        }
-        defer n_cur.Close(context.Background())
-
-        var queried_emails[]mongo_schemes.Email = make([]mongo_schemes.Email, 0)
-        if err := n_cur.All(context.Background(), &queried_emails); err != nil {
-            log.Println("Error retrieving emails: "+err.Error())
-            responder.WriteError("Error retrieving emails")
-            return
-        }
-
-        pair_emails := pairBy(metadata, queried_emails, func(m mongo_schemes.Metadata, e mongo_schemes.Email) bool {
-            return m.EmailID == e.Id
-        })
-
-        response_emails := mapFunc(func(i int, v Tuple[mongo_schemes.Metadata, mongo_schemes.Email]) api_utils.ResponseEmail {
-            metadata := v.first
-            email := v.second
-            return api_utils.ResponseEmail{
-                Id: metadata.Id,
-                Encryption: email.Encryption,
-                KeyUsed: metadata.KeyUsed,
-                From: email.From,
-                MessageId: metadata.MessageId,
-                Headers: email.Headers,
-                Body: email.Body,
-                CipherText: metadata.Ciphertext,
-                EncryptedKey: metadata.EncryptedKey,
-                DHPublicKey: email.DHPublicKey,
-                Private: metadata.Private,
-                Sent: metadata.Sent,
-                Read: metadata.Read,
-                Starred: metadata.Starred,
-                Tags: metadata.Tags,
+        if cur.Next(context.TODO()) {
+            if err := cur.Decode(&emails_response); err != nil {
+                log.Println("Error decoding emails:", err.Error())
+                responder.WriteError("Server errror")
+                return
             }
-        }, pair_emails)
-        
-        responder.WriteCountData(response_emails, int(found_count))
+        } else {
+                log.Println("Error getting query db response")
+                responder.WriteError("Server error")
+                return
+        }
+        var emails []api_utils.ResponseEmail = make([]api_utils.ResponseEmail, 0)
+        for _, v := range emails_response.Data {
+            emails = append(emails, api_utils.ResponseEmail{
+                Encryption: v.Email.Encryption,
+                KeyUsed: v.Metadata.KeyUsed,
+                EncryptedKey: v.Metadata.EncryptedKey,
+                CipherText: v.Metadata.Ciphertext,
+                DHPublicKey: v.Email.DHPublicKey,
+                From: v.Metadata.From,
+                MessageId: v.Metadata.MessageId,
+                Headers: v.Email.Headers,
+                Body: v.Email.Body,
+                Private: v.Metadata.Private,
+                Sent: v.Metadata.Sent,
+                Read: v.Metadata.Read,
+                Starred: v.Metadata.Starred,
+                Deleted: v.Metadata.Deleted,
+                Tags: v.Metadata.Tags,
+            })
+        }
+
+        responder.WriteCountData(emails, emails_response.Count)
     })
 }
 
 type EncryptRecipient struct {
     Email string `json:"email"`
     Name string `json:"name"`
-    KeyUsed string `json:"key_used"`
-    Ciphertext string `json:"ciphertext"`
-    EncryptedKey string `json:"encrypted_key"`
+    KeyUsed []byte `json:"key_used"`
+    Ciphertext []byte `json:"ciphertext"`
+    EncryptedKey []byte `json:"encrypted_key"`
     Sender bool `json:"sender"`
     To bool `json:"to"`
     CC bool `json:"cc"`
     BCC bool `json:"bcc"`
+    Plaintext bool `json:"plaintext"`
 }
 
-type SendPrivateRequest struct {
+type SendRequest struct {
     Encryption int `json:"encryption"`
     To []EncryptRecipient `json:"to"`
     Subject string `json:"subject"`
-    Body string `json:"body"`
+    Body []byte `json:"body"`
+    PlaintextBody string `json:"plaintext"`
     ContentType string `json:"content_type"`
     Boundary string `json:"boundary"`
     InReplyTo string `json:"in_reply_to"`
@@ -372,31 +269,55 @@ func check_valid_boundary(boundary string) bool {
     return boundary_regex.Match([]byte(boundary))
 }
 
-func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, metadata_size *int) http.Handler {
+func send_outbound_emails() {
+}
+
+func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, usage_collection *mongo.Collection, metadata_size *int64) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
 
-        if user.Usage.SentEmails >= user.PlanConfig.DailyEmailLimit {
+        tracked_usage, err := usage.GetUsage(context.TODO(), usage_collection, user.Id)
+        if err != nil {
+            log.Println("Error retrieving usage:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        if tracked_usage.SentEmails >= user.PlanConfig.DailyEmailLimit {
             responder.WriteError("Exceeded daily emails sent")
             return
         }
 
-        var send_request SendPrivateRequest 
-        if err := json.NewDecoder(r.Body).Decode(&send_request); err != nil {
+        send_request, err := api_utils.DecodeJson[SendRequest](r.Body)
+        if err != nil {
             log.Println("Error decoding request:", err.Error())
             responder.WriteError("Invalid request body")
             return
         }
 
-        to_emails := filterFunc(func(i int, e EncryptRecipient) bool { return e.To}, send_request.To)
+        var to_emails []EncryptRecipient
+        var cc_emails []EncryptRecipient
+        var plaintext_emails []string
+        var encrypted_emails []string
+        for _, r := range send_request.To {
+            if r.To {
+                to_emails = append(to_emails, r)
+            } else if r.CC {
+                cc_emails = append(cc_emails, r)
+            }
+            if r.Plaintext {
+                plaintext_emails = append(plaintext_emails, r.Email)
+            } else {
+                encrypted_emails = append(encrypted_emails, r.Email)
+            }
+        }
+
         if len(to_emails) == 0 {
             log.Println("Tried to send an email without to recipients")
             responder.WriteError("No recipients specified")
             return
         }
-
-        cc_emails := filterFunc(func(i int, e EncryptRecipient) bool { return e.CC}, send_request.To)
         
         email_id := primitive.NewObjectID()
         message_id := fmt.Sprintf("<%s@secria.me>", email_id.Hex()) // Change when more domains are allowed
@@ -420,12 +341,17 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
         }
 
         if !check_valid_boundary(send_request.Boundary) {
+            log.Println("Bad boundary format: ", send_request.Boundary)
             responder.WriteError("Bad boundary format")
             return
         }
 
         if send_request.ContentType == "multipart/mixed" || send_request.ContentType == "multipart/alternative" {
             headers += fmt.Sprintf("Content-Type: %s; boundary=%s", send_request.ContentType, send_request.Boundary)
+        }
+
+        if len(plaintext_emails) > 0 {
+            go send_outbound_emails()
         }
 
         email := mongo_schemes.Email{
@@ -443,19 +369,20 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
             return
         }
 
-        estimated_size := len(email_bson) + *metadata_size
+        estimated_size := int64(len(email_bson)) + *metadata_size
 
         raw_email := bson.Raw(email_bson)
 
         _, err = email_collection.InsertOne(context.Background(), raw_email)
 
         if err != nil {
-            log.Println("There was an error creating the email:",err.Error())
+            log.Println("There was an error creating the email:", err.Error())
             responder.WriteError("Server error")
             return
         }
 
-        list := mapFunc(func(i int, u EncryptRecipient) interface{} {
+        var metadata []interface{}
+        for _, u := range send_request.To {
             m := mongo_schemes.Metadata{
                 UsedAddress: u.Email,
                 Size: estimated_size,
@@ -470,49 +397,27 @@ func SendPrivate(users_collection *mongo.Collection, metadata_collection *mongo.
             }
             if u.Sender {
                 m.Sent = true
-            } else if u.BCC {
-                m.BCC = true
             }
-            return m
-        },
-        send_request.To)
+            metadata = append(metadata, m)
+        }
 
-        _, err = metadata_collection.InsertMany(context.Background(), list)
+        _, err = metadata_collection.InsertMany(context.Background(), metadata)
         if err != nil {
             log.Println("There was an error creating the email metadata:", err.Error())
             responder.WriteError("Server error")
             return
         }
 
-        user_emails := mapFunc(func(i int, u EncryptRecipient) string { return u.Email }, send_request.To)
-
-        filter := bson.D{{Key: "email", Value: bson.M{"$in": user_emails}}}
-        update := bson.D{
-            {Key: "$inc", Value: bson.M{"usage.used_space": estimated_size}},
-        }
-
-        // Update other users
-        _, err = users_collection.UpdateMany(context.TODO(), filter, update)
-
+        err = usage.IncrementUsageSize(context.TODO(), usage_collection, encrypted_emails, estimated_size) // Update other users
         if err != nil {
             log.Println("Error updating used size:", err.Error())
             responder.WriteError("Server error")
             return
         }
 
-        // Update sending user
-        sent_emails_today := user.Usage.SentEmails + 1
-        if time.Now().After(user.Usage.ResetDate) {
-            sent_emails_today = 1
-            update = append(update, bson.E{Key: "$set", Value: bson.M{"usage.sent_emails": sent_emails_today}})
-            now := time.Now().UTC()
-            update = append(update, bson.E{Key: "$set", Value: bson.M{"usage.reset_date": time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())}})
-        }
-
-        _, err = users_collection.UpdateByID(context.TODO(), user.Id, update)
-
+        err = usage.IncrementSentUsage(context.TODO(), usage_collection, user.Usage, estimated_size)
         if err != nil {
-            log.Println("Error updating used size:", err.Error())
+            log.Println("Error updating usage for sender: ", err.Error())
             responder.WriteError("Server error")
             return
         }
@@ -530,7 +435,7 @@ func split_user_domain(email string) (string, string, error) {
 }
 
 func check_domain_ownership(email string) bool {
-    return email == "secria.com"
+    return email == "secria.me"
 }
 
 func split_user_sub(user string) (string, string, error) {
@@ -544,172 +449,172 @@ func split_user_sub(user string) (string, string, error) {
 }
 
 // func store_owned_messages(ctx context.Context, user_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, from string, recipients []RecipientDomainWrapper, headers map[string]string, body string) chan error {
-func store_owned_messages(ctx context.Context, user_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, from string, recipients []RecipientDomainWrapper, body string) chan error {
-    ch := make(chan error)
-    go func() {
-        owned_emails := mapFunc(func(i int, r RecipientDomainWrapper) string { return r.Email }, recipients)
-        filter := bson.D{{Key: "email", Value: bson.M{"$in": owned_emails}}}
+// func store_owned_messages(ctx context.Context, user_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, from string, recipients []RecipientDomainWrapper, body string) chan error {
+//     ch := make(chan error)
+//     go func() {
+//         owned_emails := mapFunc(func(i int, r RecipientDomainWrapper) string { return r.Email }, recipients)
+//         filter := bson.D{{Key: "email", Value: bson.M{"$in": owned_emails}}}
+//
+//         cur, err := user_collection.Find(context.Background(), filter)
+//         if err != nil {
+//             ch <- err
+//             return
+//         }
+//         defer cur.Close(context.Background())
+//
+//         var users []mongo_schemes.User = make([]mongo_schemes.User, 0)
+//         if err := cur.All(context.Background(), &users); err != nil {
+//             ch <- err
+//             return
+//         }
+//
+//         email_key := make([]byte, 32)
+//         _, err = rand.Read(email_key)
+//         if err != nil {
+//             ch <- err
+//             return
+//         }
+//
+//         encrypted_body_encoded, err := encryption.AesEncryptCBC(email_key, []byte(body))
+//         if err != nil {
+//             ch <- err
+//             return
+//         }
+//
+//         dh_throw_priv, err := ecdh.P256().GenerateKey(rand.Reader)
+//         if err != nil {
+//             ch <- err
+//             return
+//         }
+//
+//         dh_throw_pub := dh_throw_priv.PublicKey()
+//         dh_throw_pub_encoded := base64.StdEncoding.EncodeToString(dh_throw_pub.Bytes())
+//
+//         metadata := make([]mongo_schemes.Metadata, 0, len(recipients))
+//         for _, recipient := range recipients {
+//             found := false
+//             for _, user := range users {
+//                 if user.MainEmail == recipient.Email {
+//                     recipient_key := user.MainKey
+//
+//                     mlkem_pub_bytes := make([]byte, 0)
+//                     _, err := base64.StdEncoding.Decode(mlkem_pub_bytes, []byte(recipient_key.MLKEMPublicKey))
+//                     if err != nil {
+//                         ch <- err
+//                         return
+//                     }
+//
+//                     dh_pub := make([]byte, 0)
+//                     _, err = base64.StdEncoding.Decode(dh_pub, []byte(recipient_key.DHPublicKey))
+//                     if err != nil {
+//                         ch <- err
+//                         return
+//                     }
+//                     dh_pub_key, err := ecdh.P256().NewPublicKey(dh_pub)
+//                     if err != nil {
+//                         ch <- err
+//                         return
+//                     }
+//
+//                     dh_shared_secret, err := dh_throw_priv.ECDH(dh_pub_key)
+//                     if err != nil {
+//                         ch <- err
+//                         return
+//                     }
+//
+//                     mlkem_pub, err := mlkem.NewEncapsulationKey1024(mlkem_pub_bytes)
+//
+//                     ciphertext, mlkem_shared_secret := mlkem_pub.Encapsulate()
+//                     if err != nil {
+//                         ch <- err
+//                         return
+//                     }
+//
+//                     var shared_secret [32]byte
+//                     for i := range mlkem_shared_secret {
+//                         shared_secret[i] = dh_shared_secret[i] ^ mlkem_shared_secret[i]
+//                     }
+//
+//                     shared_secret = sha256.Sum256(shared_secret[:])
+//
+//                     encrypted_email_key_encoded, err := encryption.AesEncryptGCM(shared_secret[:], email_key)
+//
+//                     ciphertext_encoded := base64.StdEncoding.EncodeToString(ciphertext)
+//
+//
+//                     m := mongo_schemes.Metadata{
+//                         UsedAddress: recipient.Email,
+//                         KeyUsed: recipient_key.KeyId,
+//                         Ciphertext: ciphertext_encoded,
+//                         EncryptedKey: encrypted_email_key_encoded,
+//                     }
+//                     if recipient.Sender {
+//                         m.Sent = true
+//                     }
+//                     if recipient.BCC {
+//                         m.BCC = true
+//                     }
+//
+//                     metadata = append(metadata, m)
+//                     found = true
+//                     break
+//                 }
+//             }
+//
+//             if found != true {
+//                 ch <- fmt.Errorf("failed to find user: %s",recipient.Email)
+//                 return
+//             }
+//         }
+//
+//         email := mongo_schemes.Email{
+//             From: from,
+//             // Headers: headers,
+//             Body: encrypted_body_encoded,
+//             DHPublicKey: dh_throw_pub_encoded,
+//         }
+//
+//         email_res, err := email_collection.InsertOne(ctx, email)
+//         if err != nil {
+//             ch <- err
+//             return
+//         }
+//
+//         email_id := email_res.InsertedID.(primitive.ObjectID)
+//
+//         final_metadata := mapFunc(func(i int, m mongo_schemes.Metadata) interface{} {
+//             m.EmailID = email_id
+//             return m
+//         }, 
+//         metadata)
+//
+//         _, err = metadata_collection.InsertMany(ctx, final_metadata)
+//
+//         // Handle errors outside
+//         ch <- err
+//     }()
+//     return ch
+// }
 
-        cur, err := user_collection.Find(context.Background(), filter)
-        if err != nil {
-            ch <- err
-            return
-        }
-        defer cur.Close(context.Background())
-
-        var users []mongo_schemes.User = make([]mongo_schemes.User, 0)
-        if err := cur.All(context.Background(), &users); err != nil {
-            ch <- err
-            return
-        }
-
-        email_key := make([]byte, 32)
-        _, err = rand.Read(email_key)
-        if err != nil {
-            ch <- err
-            return
-        }
-
-        encrypted_body_encoded, err := encryption.AesEncryptCBC(email_key, []byte(body))
-        if err != nil {
-            ch <- err
-            return
-        }
-
-        dh_throw_priv, err := ecdh.P256().GenerateKey(rand.Reader)
-        if err != nil {
-            ch <- err
-            return
-        }
-
-        dh_throw_pub := dh_throw_priv.PublicKey()
-        dh_throw_pub_encoded := base64.StdEncoding.EncodeToString(dh_throw_pub.Bytes())
-
-        metadata := make([]mongo_schemes.Metadata, 0, len(recipients))
-        for _, recipient := range recipients {
-            found := false
-            for _, user := range users {
-                if user.MainEmail == recipient.Email {
-                    recipient_key := user.MainKey
-
-                    mlkem_pub_bytes := make([]byte, 0)
-                    _, err := base64.StdEncoding.Decode(mlkem_pub_bytes, []byte(recipient_key.MLKEMPublicKey))
-                    if err != nil {
-                        ch <- err
-                        return
-                    }
-
-                    dh_pub := make([]byte, 0)
-                    _, err = base64.StdEncoding.Decode(dh_pub, []byte(recipient_key.DHPublicKey))
-                    if err != nil {
-                        ch <- err
-                        return
-                    }
-                    dh_pub_key, err := ecdh.P256().NewPublicKey(dh_pub)
-                    if err != nil {
-                        ch <- err
-                        return
-                    }
-
-                    dh_shared_secret, err := dh_throw_priv.ECDH(dh_pub_key)
-                    if err != nil {
-                        ch <- err
-                        return
-                    }
-
-                    mlkem_pub, err := mlkem.NewEncapsulationKey1024(mlkem_pub_bytes)
-
-                    ciphertext, mlkem_shared_secret := mlkem_pub.Encapsulate()
-                    if err != nil {
-                        ch <- err
-                        return
-                    }
-
-                    var shared_secret [32]byte
-                    for i := range mlkem_shared_secret {
-                        shared_secret[i] = dh_shared_secret[i] ^ mlkem_shared_secret[i]
-                    }
-
-                    shared_secret = sha256.Sum256(shared_secret[:])
-
-                    encrypted_email_key_encoded, err := encryption.AesEncryptGCM(shared_secret[:], email_key)
-
-                    ciphertext_encoded := base64.StdEncoding.EncodeToString(ciphertext)
-
-
-                    m := mongo_schemes.Metadata{
-                        UsedAddress: recipient.Email,
-                        KeyUsed: recipient_key.KeyId,
-                        Ciphertext: ciphertext_encoded,
-                        EncryptedKey: encrypted_email_key_encoded,
-                    }
-                    if recipient.Sender {
-                        m.Sent = true
-                    }
-                    if recipient.BCC {
-                        m.BCC = true
-                    }
-
-                    metadata = append(metadata, m)
-                    found = true
-                    break
-                }
-            }
-
-            if found != true {
-                ch <- fmt.Errorf("failed to find user: %s",recipient.Email)
-                return
-            }
-        }
-
-        email := mongo_schemes.Email{
-            From: from,
-            // Headers: headers,
-            Body: encrypted_body_encoded,
-            DHPublicKey: dh_throw_pub_encoded,
-        }
-
-        email_res, err := email_collection.InsertOne(ctx, email)
-        if err != nil {
-            ch <- err
-            return
-        }
-
-        email_id := email_res.InsertedID.(primitive.ObjectID)
-
-        final_metadata := mapFunc(func(i int, m mongo_schemes.Metadata) interface{} {
-            m.EmailID = email_id
-            return m
-        }, 
-        metadata)
-
-        _, err = metadata_collection.InsertMany(ctx, final_metadata)
-
-        // Handle errors outside
-        ch <- err
-    }()
-    return ch
-}
-
-func send_emails_to_domain(from string, users []RecipientDomainWrapper, domain string, message []byte) chan error {
-    ret := make(chan error)
-
-    go func() {
-        domain_emails := mapFunc(func(i int, u RecipientDomainWrapper) string { return u.Email }, users)
-        url := domain + ":smtp"
-        client, err := smtp.Dial(url)
-        if err != nil {
-            ret <- err
-            return
-        }
-
-        err = client.SendMail(from, domain_emails, bytes.NewReader(message))
-
-        // Handle errors in main
-        ret <- err
-    }()
-    return ret
-}
+// func send_emails_to_domain(from string, users []RecipientDomainWrapper, domain string, message []byte) chan error {
+//     ret := make(chan error)
+//
+//     go func() {
+//         domain_emails := mapFunc(func(i int, u RecipientDomainWrapper) string { return u.Email }, users)
+//         url := domain + ":smtp"
+//         client, err := smtp.Dial(url)
+//         if err != nil {
+//             ret <- err
+//             return
+//         }
+//
+//         err = client.SendMail(from, domain_emails, bytes.NewReader(message))
+//
+//         // Handle errors in main
+//         ret <- err
+//     }()
+//     return ret
+// }
 
 type Destination int
 
@@ -737,119 +642,119 @@ type SendPublicRequest struct {
     Body string `json:"body"`
 }
 
-func SendPublic(users_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        responder := api_utils.NewJsonResponder[string](w)
-        user := r.Context().Value("user").(mongo_schemes.User)
-
-        var send_request SendPublicRequest
-        if err := json.NewDecoder(r.Body).Decode(&send_request); err != nil {
-            log.Println("Error decoding request: "+err.Error())
-            responder.WriteError("Invalid request body")
-            return
-        }
-
-        valid_addresses := append(user.Addresses, user.MainEmail)
-
-        if !slices.Contains(valid_addresses, send_request.Address) {
-            log.Println("Subaddress was not found")
-            responder.WriteError("Subaddress was not found")
-            return
-        }
-
-        to_length := len(send_request.To)
-        cc_length := len(send_request.CC)
-        bcc_length := len(send_request.BCC)
-        length := to_length + cc_length + bcc_length + 1
-
-        var users []RecipientDomainWrapper = make([]RecipientDomainWrapper, 0, length)
-        for i, address := range send_request.To {
-            username, domain, err := split_user_domain(address)
-            if err != nil {
-                log.Println("Malformed address: "+address)
-                responder.WriteError("Malformed address:", address)
-                return
-            }
-            recipient := RecipientDomainWrapper{
-                Recipient: Recipient{
-                    Email: address,
-                },
-                Username: username,
-                Domain: domain,
-            }
-            if i < to_length {
-                recipient.To = true
-            } else if i < cc_length {
-                recipient.CC = true
-            } else if i < bcc_length {
-                recipient.BCC = true
-            } else {
-                recipient.Sender = true
-            }
-            users = append(users, recipient)
-        }
-
-        users_by_domain := groupBy(func(i int, v RecipientDomainWrapper) string  { return v.Domain}, users)
-
-        var owned_domain_users []RecipientDomainWrapper = make([]RecipientDomainWrapper, 0)
-        var outbound_domains []string = make([]string, 0)
-        for d, v := range users_by_domain {
-            if check_domain_ownership(d) {
-                for _, u := range v {
-                    username, subaddress, err := split_user_sub(u.Username)
-                    if err != nil {
-                        log.Println("There was an error parsing the username: "+err.Error())
-                        responder.WriteError("Malformed secria user recipient")
-                        return
-                    }
-                    u.Username = username
-                    u.Subaddress = subaddress
-                    owned_domain_users = append(owned_domain_users, u)
-                }
-            } else {
-                outbound_domains = append(outbound_domains, d)
-            }
-        }
-
-        // from := user.Username + "+" + send_request.Address + "@" + user.Domain;
-        from := user.MainEmail // This is wrong
-
-        headers := "From: " + send_request.Address + "\r\n"
-        headers += "To" + strings.Join(send_request.To, ", ") + "\r\n"
-        headers += "CC" + strings.Join(send_request.CC, ", ") + "\r\n"
-        headers += "Subject" + send_request.Subject + "\r\n"
-        headers += "\r\n"
-
-        body := headers + send_request.Body
-
-        owned_channel := store_owned_messages(context.Background(), users_collection, metadata_collection, email_collection, from, owned_domain_users, body)
-
-        outbound_channels := make([]chan error, 0)
-        for k, v := range users_by_domain {
-            // ch := send_emails_to_domain(from, v, k, []byte(message))
-            ch := send_emails_to_domain(from, v, k, []byte(body))
-            outbound_channels = append(outbound_channels, ch)
-        }
-
-        err := <- owned_channel
-        if err != nil {
-            log.Println("There was an error creating the public email: "+err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
-        for _, ch := range outbound_channels {
-            err := <- ch
-            if err != nil {
-                log.Println("There was an error sending the public email: "+err.Error())
-                responder.WriteError("Failed to connect to domain")
-                return
-            }
-        }
-        
-        responder.WriteData("Email sent correctly")
-    })
-}
+// func SendPublic(users_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection) http.Handler {
+//     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//         responder := api_utils.NewJsonResponder[string](w)
+//         user := r.Context().Value("user").(mongo_schemes.User)
+//
+//         var send_request SendPublicRequest
+//         if err := json.NewDecoder(r.Body).Decode(&send_request); err != nil {
+//             log.Println("Error decoding request: "+err.Error())
+//             responder.WriteError("Invalid request body")
+//             return
+//         }
+//
+//         valid_addresses := append(user.Addresses, user.MainEmail)
+//
+//         if !slices.Contains(valid_addresses, send_request.Address) {
+//             log.Println("Subaddress was not found")
+//             responder.WriteError("Subaddress was not found")
+//             return
+//         }
+//
+//         to_length := len(send_request.To)
+//         cc_length := len(send_request.CC)
+//         bcc_length := len(send_request.BCC)
+//         length := to_length + cc_length + bcc_length + 1
+//
+//         var users []RecipientDomainWrapper = make([]RecipientDomainWrapper, 0, length)
+//         for i, address := range send_request.To {
+//             username, domain, err := split_user_domain(address)
+//             if err != nil {
+//                 log.Println("Malformed address: "+address)
+//                 responder.WriteError("Malformed address:", address)
+//                 return
+//             }
+//             recipient := RecipientDomainWrapper{
+//                 Recipient: Recipient{
+//                     Email: address,
+//                 },
+//                 Username: username,
+//                 Domain: domain,
+//             }
+//             if i < to_length {
+//                 recipient.To = true
+//             } else if i < cc_length {
+//                 recipient.CC = true
+//             } else if i < bcc_length {
+//                 recipient.BCC = true
+//             } else {
+//                 recipient.Sender = true
+//             }
+//             users = append(users, recipient)
+//         }
+//
+//         users_by_domain := groupBy(func(i int, v RecipientDomainWrapper) string  { return v.Domain}, users)
+//
+//         var owned_domain_users []RecipientDomainWrapper = make([]RecipientDomainWrapper, 0)
+//         var outbound_domains []string = make([]string, 0)
+//         for d, v := range users_by_domain {
+//             if check_domain_ownership(d) {
+//                 for _, u := range v {
+//                     username, subaddress, err := split_user_sub(u.Username)
+//                     if err != nil {
+//                         log.Println("There was an error parsing the username: "+err.Error())
+//                         responder.WriteError("Malformed secria user recipient")
+//                         return
+//                     }
+//                     u.Username = username
+//                     u.Subaddress = subaddress
+//                     owned_domain_users = append(owned_domain_users, u)
+//                 }
+//             } else {
+//                 outbound_domains = append(outbound_domains, d)
+//             }
+//         }
+//
+//         // from := user.Username + "+" + send_request.Address + "@" + user.Domain;
+//         from := user.MainEmail // This is wrong
+//
+//         headers := "From: " + send_request.Address + "\r\n"
+//         headers += "To" + strings.Join(send_request.To, ", ") + "\r\n"
+//         headers += "CC" + strings.Join(send_request.CC, ", ") + "\r\n"
+//         headers += "Subject" + send_request.Subject + "\r\n"
+//         headers += "\r\n"
+//
+//         body := headers + send_request.Body
+//
+//         owned_channel := store_owned_messages(context.Background(), users_collection, metadata_collection, email_collection, from, owned_domain_users, body)
+//
+//         outbound_channels := make([]chan error, 0)
+//         for k, v := range users_by_domain {
+//             // ch := send_emails_to_domain(from, v, k, []byte(message))
+//             ch := send_emails_to_domain(from, v, k, []byte(body))
+//             outbound_channels = append(outbound_channels, ch)
+//         }
+//
+//         err := <- owned_channel
+//         if err != nil {
+//             log.Println("There was an error creating the public email: "+err.Error())
+//             responder.WriteError("Server error")
+//             return
+//         }
+//
+//         for _, ch := range outbound_channels {
+//             err := <- ch
+//             if err != nil {
+//                 log.Println("There was an error sending the public email: "+err.Error())
+//                 responder.WriteError("Failed to connect to domain")
+//                 return
+//             }
+//         }
+//
+//         responder.WriteData("Email sent correctly")
+//     })
+// }
 
 type FlagEmailsRequest struct {
     EmailID []primitive.ObjectID `json:"email_id"`
@@ -968,13 +873,21 @@ func TagEmails(metadata_collection *mongo.Collection) http.Handler {
             return
         }
 
-        user_tags := mapFunc(func(i int, u mongo_schemes.UserTag) string { return u.Name}, user.Tags)
+        failed := false
+        outer:
         for _, tag := range tag_request.Tags {
-            if !sliceContains(tag, user_tags) {
-                log.Println("User tried to set a non existing tag: "+tag)
-                responder.WriteError("Invalid tag")
-                return
+            for _, user_tag := range user.Tags {
+                if user_tag.Name == tag {
+                    continue outer
+                }
             }
+            failed = true
+            break
+        }
+        if failed {
+            log.Println("User tried to set a non existing tag: ", tag_request.Tags)
+            responder.WriteError("Invalid tag")
+            return
         }
 
         filter := bson.M{"_id": bson.M{"$in": tag_request.EmailID}}
@@ -996,7 +909,7 @@ func TagEmails(metadata_collection *mongo.Collection) http.Handler {
 
         _, err := metadata_collection.UpdateMany(context.Background(), filter, update)
         if err != nil {
-            log.Println("Failed to update email: "+err.Error())
+            log.Println("Failed to update email: ", err.Error())
             responder.WriteError("Server error")
             return
         }
@@ -1028,26 +941,20 @@ type DeleteEmailRequest struct {
 func DeleteEmails(metadata_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
-        user := r.Context().Value("user").(mongo_schemes.User)
 
-        var delete_email_request DeleteEmailRequest 
-        if err := json.NewDecoder(r.Body).Decode(&delete_email_request); err != nil {
-            log.Println("Failed to parse mark read request: "+err.Error())
+        delete_email_request, err := api_utils.DecodeJson[DeleteEmailRequest](r.Body)
+        if err != nil {
+            log.Println("Failed to parse mark read request: ", err.Error())
             responder.WriteError("Invalid request body")
             return
         }
 
-        filter := bson.D{
-            {Key: "user_email", Value: user.MainEmail},
-            {Key: "_id", Value: bson.M{
-                "$in": delete_email_request.EmailID,
-            }},
-        }
+        filter := bson.M{"_id": bson.M{"$in": delete_email_request.EmailID}}
         update := bson.D{{Key: "$set", Value: bson.M{
             "deleted": true,
         }}}
 
-        _, err := metadata_collection.UpdateMany(context.TODO(), filter, update)
+        _, err = metadata_collection.UpdateMany(context.TODO(), filter, update)
         if err != nil {
             log.Println("Failed to set deleted tag: "+err.Error())
             responder.WriteError("Failed to delete")
@@ -1055,5 +962,36 @@ func DeleteEmails(metadata_collection *mongo.Collection) http.Handler {
         }
 
         responder.WriteData("Deleted emails")
+    })
+}
+
+type RestoreEmailRequest struct {
+    EmailId []primitive.ObjectID `json:"email_id"`
+}
+
+func RestoreEmails(metadata_collection *mongo.Collection) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        responder := api_utils.NewJsonResponder[string](w)
+
+        restore_email_request, err := api_utils.DecodeJson[DeleteEmailRequest](r.Body)
+        if err != nil {
+            log.Println("Failed to parse mark read request: ", err.Error())
+            responder.WriteError("Invalid request body")
+            return
+        }
+
+        filter := bson.M{"_id": bson.M{"$in": restore_email_request.EmailID}}
+        update := bson.D{{Key: "$unset", Value: bson.M{
+            "deleted": true,
+        }}}
+
+        _, err = metadata_collection.UpdateMany(context.TODO(), filter, update)
+        if err != nil {
+            log.Println("Failed to remove deleted tag: "+err.Error())
+            responder.WriteError("Failed to restore")
+            return
+        }
+
+        responder.WriteData("Restored emails")
     })
 }

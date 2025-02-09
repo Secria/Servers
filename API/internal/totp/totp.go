@@ -3,6 +3,7 @@ package totp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"secria_api/internal/api_utils"
@@ -148,11 +149,11 @@ func addAttemptToSession(ctx context.Context, mfa_attempt_client *redis.Client, 
         return err
     }
 
-    mfa_attempt_client.Set(ctx, user_id.Hex(), new_request_encoded, time.Minute * 5)
+    mfa_attempt_client.Set(ctx, fmt.Sprintf("otp:%s", user_id.Hex()), new_request_encoded, time.Minute * 5)
     return nil
 }
 
-func LoginCheckTOTP(cookie_client *redis.Client, mfa_attempt_client *redis.Client, user_collection *mongo.Collection) http.Handler {
+func LoginCheckTOTP(redis_client *redis.Client, user_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         user := r.Context().Value("user").(mongo_schemes.User)
         responder := api_utils.NewJsonResponder[api_utils.LoginResponse](w)
@@ -164,7 +165,7 @@ func LoginCheckTOTP(cookie_client *redis.Client, mfa_attempt_client *redis.Clien
             return
         }
 
-        stored_data, err := mfa_attempt_client.Get(context.TODO(), user.Id.Hex()).Result()
+        stored_data, err := redis_client.Get(context.TODO(), fmt.Sprintf("otp:%s", user.Id.Hex())).Result()
         if err != nil {
             log.Println("Couldn't retrieve mfa attempt: ", err.Error())
             responder.WriteError("MFA attempt not found")
@@ -195,18 +196,18 @@ func LoginCheckTOTP(cookie_client *redis.Client, mfa_attempt_client *redis.Clien
         if !valid {
             log.Println("Invalid code provided for login")
             responder.WriteError("Invalid code")
-            go addAttemptToSession(context.TODO(), mfa_attempt_client, user.Id, mfa_attempt)
+            go addAttemptToSession(context.TODO(), redis_client, user.Id, mfa_attempt)
             return
         }
 
-        err = mfa_attempt_client.Del(context.TODO(), user.Id.Hex()).Err()
+        err = redis_client.Del(context.TODO(), fmt.Sprintf("otp:%s", user.Id.Hex())).Err()
         if err != nil {
             log.Println("Couldn't delete mfa attempt", err.Error())
             responder.WriteError("Server error")
             return
         }
 
-        cookie, err := redis_handler.GenerateCookie(cookie_client, user.Id)
+        cookie, err := redis_handler.GenerateCookie(redis_client, user.Id)
         if err != nil {
             log.Println("There was an error generating the cookie: ", err.Error())
             responder.WriteError("Authentication failed")

@@ -8,7 +8,6 @@ import (
 	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"shared/mongo_schemes"
 )
 
@@ -18,16 +17,16 @@ func Pkcs7Pad(data []byte, blockSize int) []byte {
 	return append(data, padText...)
 }
 
-func AesEncryptCBC(key []byte, plain []byte) (string, error) {
+func AesEncryptCBC(key []byte, plain []byte) ([]byte, error) {
     iv := make([]byte, aes.BlockSize)
     _, err := rand.Read(iv)
     if err != nil {
-        return "", err
+        return nil, err
     }
 
     block, err := aes.NewCipher(key)
     if err != nil {
-        return "", err
+        return nil, err
     }
 
     paddedBody := Pkcs7Pad(plain, aes.BlockSize)
@@ -36,41 +35,39 @@ func AesEncryptCBC(key []byte, plain []byte) (string, error) {
     mode.CryptBlocks(cipherText, paddedBody)
 
     result := append(iv, cipherText...)
-    encoded := base64.StdEncoding.EncodeToString(result)
 
-    return encoded, nil
+    return result, nil
 }
 
-func AesEncryptGCM(key []byte, plain []byte) (string, error) {
+func AesEncryptGCM(key []byte, plain []byte) ([]byte, error) {
     nonce := make([]byte, 12)
     _, err := rand.Read(nonce)
     if err != nil {
-        return "", nil
+        return nil, err
     }
 
     block, err := aes.NewCipher(key)
     if err != nil {
-        return "", nil
+        return nil, err
     }
 
     aesgcm, err := cipher.NewGCM(block)
     if err != nil {
-        return "", nil
+        return nil, err
     }
 
     ciphertext := aesgcm.Seal(nil, nonce, plain, nil)
 
     result := append(nonce, ciphertext...)
-    encoded := base64.StdEncoding.EncodeToString(result)
 
-    return encoded, nil
+    return result, nil
 }
 
-func EncryptEmail(message []byte) (string, []byte, error) {
+func EncryptEmail(message []byte) ([]byte, []byte, error) {
     email_key := make([]byte, 32)
     _, err := rand.Read(email_key)
     if err != nil {
-        return "", nil, err 
+        return nil, nil, err 
     }
 
     encrypted_body, err := AesEncryptCBC(email_key, message)
@@ -78,24 +75,15 @@ func EncryptEmail(message []byte) (string, []byte, error) {
 }
 
 type EncryptedKey struct {
-    SecondStageKey string
-    CipherText string
-    UsedKey string
+    SecondStageKey []byte 
+    CipherText []byte 
+    UsedKey []byte
 }
 
 func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo_schemes.User) (EncryptedKey, error) {
     recipient_key := user.MainKey
 
-    mlkem_pub_bytes, err := base64.StdEncoding.DecodeString(recipient_key.MLKEMPublicKey)
-    if err != nil {
-        return EncryptedKey{}, err
-    }
-
-    dh_pub_bytes, err := base64.StdEncoding.DecodeString(recipient_key.DHPublicKey)
-    if err != nil {
-        return EncryptedKey{}, err
-    }
-    dh_pub_key, err := ecdh.P256().NewPublicKey(dh_pub_bytes)
+    dh_pub_key, err := ecdh.P256().NewPublicKey(recipient_key.DHPublicKey)
     if err != nil {
         return EncryptedKey{}, err
     }
@@ -105,7 +93,7 @@ func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo
         return EncryptedKey{}, err
     }
 
-    mlkem_pub, err := mlkem.NewEncapsulationKey1024(mlkem_pub_bytes)
+    mlkem_pub, err := mlkem.NewEncapsulationKey1024(recipient_key.MLKEMPublicKey)
 
     ciphertext, mlkem_shared_secret := mlkem_pub.Encapsulate()
     if err != nil {
@@ -116,13 +104,11 @@ func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo
 
     shared_secret := sha256.Sum256(concatenated)
 
-    encrypted_email_key_encoded, err := AesEncryptGCM(shared_secret[:], email_key)
-
-    ciphertext_encoded := base64.StdEncoding.EncodeToString(ciphertext)
+    encrypted_email_key, err := AesEncryptGCM(shared_secret[:], email_key)
 
     return EncryptedKey{
-        SecondStageKey: encrypted_email_key_encoded,
-        CipherText: ciphertext_encoded,
+        SecondStageKey: encrypted_email_key,
+        CipherText: ciphertext,
         UsedKey: recipient_key.KeyId,
     }, nil
 }

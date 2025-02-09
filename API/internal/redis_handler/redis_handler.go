@@ -3,11 +3,13 @@ package redis_handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 
-    "shared/mongo_schemes"
+	"shared/mongo_schemes"
+
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
@@ -22,7 +24,7 @@ type CookieObject struct {
 }
 
 func GetCookieObject(redis_client *redis.Client, cookie_value string) (CookieObject, error) {
-    cookie_string, err := redis_client.Get(context.Background(), cookie_value).Result()
+    cookie_string, err := redis_client.Get(context.Background(), fmt.Sprintf("cookie:%s", cookie_value)).Result()
     if err != nil {
         log.Println("Failed to get session cookie: ", err.Error())
         return CookieObject{}, err
@@ -45,7 +47,7 @@ func GetUserFromCookie(user_collection *mongo.Collection, cookie_object CookieOb
     var user mongo_schemes.User
     err := user_collection.FindOne(context.Background(), filter).Decode(&user)
     if err != nil {
-        log.Println("Failed find session cookie user: "+err.Error())
+        log.Println("Failed find session cookie user: ", err.Error())
         return mongo_schemes.User{}, err
     }
     
@@ -55,18 +57,18 @@ func GetUserFromCookie(user_collection *mongo.Collection, cookie_object CookieOb
 func GenerateCookie(redis_client *redis.Client, user_id primitive.ObjectID) (http.Cookie, error) {
     new_cookie := CookieObject{
         UserId: user_id,
-        RefreshDate: time.Now().Add(time.Hour * 2).Unix(),
+        RefreshDate: time.Now().UTC().Add(time.Hour * 2).Unix(),
     }
     new_cookie_json, err := json.Marshal(new_cookie)
     if err != nil {
-        log.Println("Failed to serialize new cookie: "+err.Error())
+        log.Println("Failed to serialize new cookie: ", err.Error())
         return http.Cookie{}, err
     }
 
     uuid := uuid.New().String()
-    err = redis_client.Set(context.Background(), uuid, new_cookie_json, time.Hour*24*7).Err()
+    err = redis_client.Set(context.Background(), fmt.Sprintf("cookie:%s", uuid), new_cookie_json, time.Hour*24*7).Err()
     if err != nil {
-        log.Println("Failed to store new cookie: "+err.Error())
+        log.Println("Failed to store new cookie: ", err.Error())
         return http.Cookie{}, err
     }
 
@@ -87,20 +89,20 @@ func GenerateCookie(redis_client *redis.Client, user_id primitive.ObjectID) (htt
 func RegenerateCookie(redis_client *redis.Client, old_cookie_name string, old_cookie_object CookieObject) (http.Cookie, error) {
     cookie, err := GenerateCookie(redis_client, old_cookie_object.UserId)
     if err != nil {
-        log.Println("Failed to generate new cookie: "+err.Error())
+        log.Println("Failed to generate new cookie: ", err.Error())
         return http.Cookie{}, err
     }
 
     old_cookie_object.NoRefresh = true
     old_cookie_json, err := json.Marshal(old_cookie_object)
     if err != nil {
-        log.Println("Failed to serialize old cookie: "+err.Error())
+        log.Println("Failed to serialize old cookie: ", err.Error())
         return http.Cookie{}, err
     }
 
-    err = redis_client.Set(context.Background(), old_cookie_name, old_cookie_json, time.Minute * 5).Err()
+    err = redis_client.Set(context.Background(), fmt.Sprintf("cookie:%s", old_cookie_name), old_cookie_json, time.Minute * 5).Err()
     if err != nil {
-        log.Println("Failed to modify old cookie ttl: "+err.Error())
+        log.Println("Failed to modify old cookie ttl: ", err.Error())
         return http.Cookie{}, err
     }
 
@@ -109,7 +111,7 @@ func RegenerateCookie(redis_client *redis.Client, old_cookie_name string, old_co
 
 func GenerateShareCode(redis_client *redis.Client, user primitive.ObjectID) (string, error) {
     uuid := uuid.New().String()
-    err := redis_client.Set(context.Background(), uuid, user.Hex(), time.Hour).Err()
+    err := redis_client.Set(context.Background(), fmt.Sprintf("code:%s", uuid), user.Hex(), time.Hour).Err()
     return uuid, err
 }
 
@@ -119,7 +121,7 @@ func GetUserFromSharedCode(redis_client *redis.Client, user_collection *mongo.Co
         return mongo_schemes.User{}, err
     }
 
-    err = redis_client.Del(context.TODO(), shared_code).Err()
+    err = redis_client.Del(context.TODO(), fmt.Sprintf("code:%s", user_id_string)).Err()
     if err != nil {
         return mongo_schemes.User{}, err
     }

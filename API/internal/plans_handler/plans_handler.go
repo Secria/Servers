@@ -7,8 +7,8 @@ import (
 var FreePlanOptions = mongo_schemes.UserPlanConfig{
     Plan: "free",
     Price: 0,
-    SpaceLimit: 4 * 1024 * 1024 * 1024, // 4 GB
-    DailyEmailLimit: 100,
-    AddressLimit: 3,
-    TagLimit: 3,
+    SpaceLimit: 1 * 1024 * 1024 * 1024, // 4 GB
+    DailyEmailLimit: 150,
+    AddressLimit: 10,
+    TagLimit: 30,
 }

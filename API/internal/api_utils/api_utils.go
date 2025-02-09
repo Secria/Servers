@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"shared/mongo_schemes"
 	"strings"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -16,26 +17,28 @@ import (
 type ContactResponse struct {
     Name string `json:"name"`
     Email string `json:"email"`
-    MLKEMPublicKey string `json:"mlkem_public"`
-    DHPublicKey string `json:"dh_public"`
+    MLKEMPublicKey []byte `json:"mlkem_public"`
+    DHPublicKey []byte `json:"dh_public"`
 }
 
 type ResponseEmail struct {
     Id primitive.ObjectID `json:"id"`
     Encryption int `json:"encryption"`
-    KeyUsed string `json:"used_key"`
+    KeyUsed []byte `json:"used_key"`
     From string `json:"from"`
     MessageId string `json:"message_id"`
     Headers string `json:"headers"`
-    Body string `json:"body"`
-    CipherText string `json:"ciphertext,omitempty"`
-    EncryptedKey string `json:"encrypted_key"`
-    DHPublicKey string `json:"dh_public,omitempty"`
+    Body []byte `json:"body"`
+    EncryptedKey []byte `json:"encrypted_key"`
+    CipherText []byte `json:"ciphertext"`
+    DHPublicKey []byte `json:"dh_public"`
     Private bool `json:"private"`
     Sent bool `json:"sent,omitempty"`
     Read bool `json:"read,omitempty"`
     Starred bool `json:"starred,omitempty"`
+    Deleted bool `json:"deleted,omitempty"`
     Tags []string `json:"tags,omitempty"`
+    Timestamp time.Time `json:"timestamp"`
 }
 
 type LoginResponse struct {
@@ -121,4 +124,3 @@ func RetrieveContacts(ctx context.Context, user_collection *mongo.Collection, em
 
     return contacts, nil
 }
-

@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +14,7 @@ import (
 
 	"shared/encryption"
 	"shared/mongo_schemes"
+	"shared/usage"
 
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-smtp"
@@ -41,7 +41,7 @@ func main() {
     user_collection := db.Collection("Users");
     email_collection := db.Collection("Emails");
     metadata_collection := db.Collection("EmailMetadata");
-    address_collection := db.Collection("Addresses")
+    usage_collection := db.Collection("Usage")
 
     dh_priv, err := ecdh.P256().GenerateKey(rand.Reader)
     if err != nil {
@@ -49,15 +49,14 @@ func main() {
     }
 
     dh_pub := dh_priv.PublicKey().Bytes()
-    encoded_dh_pub := base64.StdEncoding.EncodeToString(dh_pub)
 
     backend := &Backend{
         MetadataCollection: metadata_collection,
         UserCollection: user_collection,
         EmailCollection: email_collection,
-        AddressCollection: address_collection,
+        UsageCollection: usage_collection,
         DHPrivateKey: *dh_priv,
-        DHPublicKey: encoded_dh_pub,
+        DHPublicKey: dh_pub,
     }
 
     s := smtp.NewServer(backend)
@@ -80,8 +79,8 @@ type Backend struct{
     MetadataCollection *mongo.Collection
     EmailCollection *mongo.Collection
     UserCollection *mongo.Collection
-    AddressCollection *mongo.Collection
-    DHPublicKey string
+    UsageCollection *mongo.Collection
+    DHPublicKey []byte 
     DHPrivateKey ecdh.PrivateKey
 }
 
@@ -115,12 +114,11 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
     return nil
 }
 
-// Use aggregation query for optimization
 func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
-    filter := bson.D{{Key: "address", Value: to}}
+    filter := bson.D{{Key: "addresses", Value: to}}
 
-    var address mongo_schemes.EmailAddress
-    err := s.Backend.AddressCollection.FindOne(context.TODO(), filter).Decode(&address)
+    var user mongo_schemes.User
+    err := s.Backend.UserCollection.FindOne(context.TODO(), filter).Decode(&user)
     if err == mongo.ErrNoDocuments {
         log.Println("RCPT user not found:", to)
         return fmt.Errorf("User not found")
@@ -128,11 +126,6 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
         log.Println("Error finding rcpt user:", err.Error())
         return fmt.Errorf("Error")
     }
-
-    filter = bson.D{{Key: "_id", Value: address.UserId}}
-
-    var user mongo_schemes.User
-    err = s.Backend.UserCollection.FindOne(context.TODO(), filter).Decode(&user)
 
     s.To = append(s.To, ExtendedUser{
         User: user,
@@ -142,7 +135,8 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
     return nil
 }
 
-var metadata_size = 2.44 * 1024
+var metadata_kb float32 = 2.44
+var metadata_size = int64(metadata_kb * 1024)
 
 func (s *Session) Data(r io.Reader) error {
     raw_headers, raw_body, err := splitCRLF(r)
@@ -181,7 +175,7 @@ func (s *Session) Data(r io.Reader) error {
     }
 
     inserted_id := res.InsertedID.(primitive.ObjectID)
-    estimated_size := email_size + int(metadata_size)
+    estimated_size := int64(email_size) + metadata_size
 
     if message_id == "" {
         message_id = fmt.Sprintf("<%s@%s>", inserted_id.Hex(), s.FromDomain)
@@ -189,12 +183,16 @@ func (s *Session) Data(r io.Reader) error {
 
 
     var metadata []interface{}
-    var to_ids []primitive.ObjectID
+    var to_emails []string
     for i := range s.To {
         user := &s.To[i]
+
+        usage, err := usage.GetUsage(context.TODO(), s.Backend.UsageCollection, user.Id)
+        if err != nil {
+        }
         
-        if user.Usage.UsedSpace < user.PlanConfig.SpaceLimit {
-            to_ids = append(to_ids, user.Id)
+        if usage.UsedSpace < user.PlanConfig.SpaceLimit {
+            to_emails = append(to_emails, user.MainEmail)
             ev, err := encryption.GenerateEncryptedKey(encryption_key, s.Backend.DHPrivateKey, &user.User)
             if err != nil {
                 log.Println("Something failed when encrypting the email", err.Error())
@@ -224,10 +222,7 @@ func (s *Session) Data(r io.Reader) error {
         return fmt.Errorf("Server error")
     }
 
-    filter := bson.D{{Key: "_id", Value: bson.M{"$in": to_ids}}}
-    update := bson.D{{Key: "$inc", Value: bson.M{"usage.used_space": estimated_size}}}
-    _, err = s.Backend.UserCollection.UpdateMany(context.TODO(), filter, update)
-
+    err = usage.IncrementUsageSize(context.TODO(), s.Backend.UsageCollection, to_emails, estimated_size)
     if err != nil {
         log.Println("Error updating used size:", err.Error())
         return fmt.Errorf("Server error")

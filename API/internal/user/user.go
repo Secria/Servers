@@ -3,7 +3,6 @@ package user
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
@@ -36,19 +35,23 @@ func GenerateAddContactCode(redis_client *redis.Client) http.Handler {
     })
 }
 
+type AddContactRequest struct {
+    Code string `json:"code"`
+}
+
 func AddContact(redis_client *redis.Client, user_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[api_utils.ContactResponse](w)
         user := r.Context().Value("user").(mongo_schemes.User)
 
-        var request_code string
-        if err := json.NewDecoder(r.Body).Decode(&request_code); err != nil {
-            log.Println("Failed to parse add contact request")
+        request_code, err := api_utils.DecodeJson[AddContactRequest](r.Body)
+        if err != nil {
+            log.Println("Failed to parse add contact request: ", err.Error())
             responder.WriteError("Invalid request body")
             return
         }
 
-        code_user, err := redis_handler.GetUserFromSharedCode(redis_client, user_collection, request_code)
+        code_user, err := redis_handler.GetUserFromSharedCode(redis_client, user_collection, request_code.Code)
         if err != nil {
             log.Println("There was an error retrieving the user from the code:", err.Error())
             responder.WriteError("Invalid code")
@@ -80,6 +83,49 @@ func AddContact(redis_client *redis.Client, user_collection *mongo.Collection) h
     })
 }
 
+type RemoveContactRequest struct {
+    Email string `json:"email"`
+}
+
+func DeleteContact(user_collection *mongo.Collection) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        responder := api_utils.NewJsonResponder[string](w)
+        user := r.Context().Value("user").(mongo_schemes.User)
+
+        remove_contact_request, err := api_utils.DecodeJson[RemoveContactRequest](r.Body)
+        if err != nil {
+            log.Println("Failed to parse remove contact request: ", err.Error())
+            responder.WriteError("Invalid request body")
+            return
+        }
+
+        if !slices.Contains(user.Contacts, remove_contact_request.Email) {
+            log.Println("Address was not found in contacts")
+            responder.WriteError("You don't have this address in contacts")
+            return
+        }
+
+        update := bson.D{{Key: "$pull", Value: bson.D{{Key: "contacts", Value: remove_contact_request.Email}}}}
+        _, err = user_collection.UpdateByID(context.Background(), user.Id, update)
+        if err != nil {
+            log.Println("Error updating user: ", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        filter := bson.D{{Key: "email", Value: remove_contact_request.Email}}
+        update = bson.D{{Key: "$pull", Value: bson.D{{Key: "contacts", Value: user.MainEmail}}}}
+        _, err = user_collection.UpdateOne(context.Background(), filter, update)
+        if err != nil {
+            log.Println("Error updating user:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        responder.WriteData("Deleted user")
+    })
+}
+
 var valid_address_regex = regexp.MustCompile(`^[a-zA-Z0-9]{3,20}$`)
 
 func check_valid_address(address string) bool {
@@ -104,7 +150,7 @@ type AddressRequest struct {
     Address string `json:"address"`
 }
 
-func AddNewAddress(user_collection *mongo.Collection, address_collection *mongo.Collection) http.Handler {
+func AddNewAddress(user_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
@@ -137,7 +183,7 @@ func AddNewAddress(user_collection *mongo.Collection, address_collection *mongo.
 
             filter := bson.D{{Key: "address", Value: random_address}}
 
-            if err := address_collection.FindOne(context.TODO(), filter).Err(); err == mongo.ErrNoDocuments {
+            if err := user_collection.FindOne(context.TODO(), filter).Err(); err == mongo.ErrNoDocuments {
                 break
             } else if err != nil {
                 log.Println("Error checking address:", err.Error())
@@ -146,23 +192,11 @@ func AddNewAddress(user_collection *mongo.Collection, address_collection *mongo.
             }
         }
 
-        address := mongo_schemes.EmailAddress{
-            Address: random_address,
-            UserId: user.Id,
-        }
-
-        _, err = address_collection.InsertOne(context.TODO(), address)
-        if err != nil {
-            log.Println("Failed to insert address:", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
         update := bson.D{{Key: "$addToSet", Value: bson.D{{Key: "addresses", Value: random_address}}}}
 
         result, err := user_collection.UpdateByID(context.Background(), user.Id, update)
         if err != nil || result.ModifiedCount != 1 {
-            log.Println("Failed to update db"+err.Error());
+            log.Println("Failed to update db", err.Error());
             responder.WriteError("Server error")
             return
         }
@@ -171,7 +205,7 @@ func AddNewAddress(user_collection *mongo.Collection, address_collection *mongo.
     })
 }
 
-func DeleteAddress(user_collection *mongo.Collection, address_collection *mongo.Collection) http.Handler {
+func DeleteAddress(user_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
@@ -180,6 +214,12 @@ func DeleteAddress(user_collection *mongo.Collection, address_collection *mongo.
         if err != nil {
             log.Println("Failed to parse remove address request: ", err.Error())
             responder.WriteError("Malformed request")
+            return
+        }
+
+        if remove_address_request.Address == user.MainEmail {
+            log.Println("Tried to delete main address")
+            responder.WriteError("You can't delete your main address")
             return
         }
 
@@ -197,19 +237,11 @@ func DeleteAddress(user_collection *mongo.Collection, address_collection *mongo.
             return
         }
 
-        filter := bson.D{{Key: "address", Value: remove_address_request.Address}}
-        _, err = address_collection.DeleteOne(context.TODO(), filter)
-        if err != nil {
-            log.Println("Failed to delete address from address collection: ", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
         responder.WriteData("Deleted address")
     })
 }
 
-func RotateAddress(user_collection *mongo.Collection, address_collection *mongo.Collection) http.Handler {
+func RotateAddress(user_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
@@ -251,7 +283,7 @@ func RotateAddress(user_collection *mongo.Collection, address_collection *mongo.
 
             filter := bson.D{{Key: "address", Value: random_address}}
 
-            if err := address_collection.FindOne(context.TODO(), filter).Err(); err == mongo.ErrNoDocuments {
+            if err := user_collection.FindOne(context.TODO(), filter).Err(); err == mongo.ErrNoDocuments {
                 break
             } else if err != nil {
                 log.Println("Error checking address:", err.Error())
@@ -277,43 +309,8 @@ func RotateAddress(user_collection *mongo.Collection, address_collection *mongo.
             return
         }
 
-        filter := bson.D{{Key: "address", Value: rotate_address_request.Address}}
-        address_update := bson.D{{Key: "$set", Value: bson.M{"address": random_address}}}
-        _, err = address_collection.UpdateOne(context.TODO(), filter, address_update)
-        if err != nil {
-            log.Println("Failed to update address on address collection: ", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
         responder.WriteData(random_address)
     })
-}
-
-func delete_user_emails(metadata_collection *mongo.Collection, email_collection *mongo.Collection, user_email string, cleanup_func func(int64)) {
-    filter := bson.D{{Key: "user_email", Value: user_email}}
-    email_update := bson.M{"$inc": bson.M{"reference_count": -1}}
-
-    var n int
-    for {
-        var metadata mongo_schemes.Metadata
-        err := metadata_collection.FindOneAndDelete(context.Background(), filter).Decode(&metadata)
-        if err == mongo.ErrNoDocuments {
-            break
-        } else if err != nil {
-            log.Println("There was an error retrieving and deleting a metadata object: "+err.Error())
-            return
-        }
-
-        _, err = email_collection.UpdateByID(context.Background(), metadata.Id, email_update)
-        if err != nil {
-            log.Println("Something failed when decrementing reference count: "+err.Error())
-            return
-        }
-
-        n += 1
-    }
-    cleanup_func(int64(n))
 }
 
 func DeleteUser(user_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, cleanup_func func(int64)) http.Handler {
@@ -328,8 +325,6 @@ func DeleteUser(user_collection *mongo.Collection, metadata_collection *mongo.Co
             responder.WriteError("Failed to delete user")
             return
         }
-
-        go delete_user_emails(metadata_collection, email_collection, user.MainEmail, cleanup_func)
 
         responder.WriteData("Deleted user")
     })
@@ -346,9 +341,15 @@ func AddUserTag(user_collection *mongo.Collection) http.Handler {
         user := r.Context().Value("user").(mongo_schemes.User)
 
         var add_tag_request AddTagRequest 
-        if err := json.NewDecoder(r.Body).Decode(&add_tag_request); err != nil {
-            log.Println("Failed to parse add tags request: "+err.Error())
+        add_tag_request, err := api_utils.DecodeJson[AddTagRequest](r.Body)
+        if err != nil {
+            log.Println("Failed to parse add tags request: ", err.Error())
             responder.WriteError("Invalid request body")
+            return
+        }
+        if len(add_tag_request.Name) <= 3 {
+            log.Println("Tag name is too short")
+            responder.WriteError("Tag name is too short")
             return
         }
 
@@ -369,7 +370,7 @@ func AddUserTag(user_collection *mongo.Collection) http.Handler {
             },
         }
 
-        _, err := user_collection.UpdateByID(context.TODO(), user.Id, update)
+        _, err = user_collection.UpdateByID(context.TODO(), user.Id, update)
         if err != nil {
             log.Println("Failed to add tag: "+err.Error())
             responder.WriteError("Invalid request body")
@@ -380,27 +381,37 @@ func AddUserTag(user_collection *mongo.Collection) http.Handler {
     })
 }
 
+type DeleteUserTagRequest struct {
+    Name string `json:"name"`
+}
+
 func DeleteUserTag(user_collection *mongo.Collection, metadata_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
 
-        var del_tag_request string 
-        if err := json.NewDecoder(r.Body).Decode(&del_tag_request); err != nil {
+        del_tag_request, err := api_utils.DecodeJson[DeleteUserTagRequest](r.Body)
+        if err != nil {
             log.Println("Failed to parse add tags request:", err.Error())
             responder.WriteError("Invalid request body")
+            return
+        }
+
+        if !slices.ContainsFunc(user.Tags, func(t mongo_schemes.UserTag) bool { return t.Name == del_tag_request.Name }) {
+            log.Println("This tag doesn't exist") 
+            responder.WriteError("This tag doesn't exist")
             return
         }
 
         update := bson.M{
             "$pull": bson.M{
                 "tags": bson.M{
-                    "name": del_tag_request,
+                    "name": del_tag_request.Name,
                 },
             },
         }
 
-        _, err := user_collection.UpdateByID(context.TODO(), user.Id, update)
+        _, err = user_collection.UpdateByID(context.TODO(), user.Id, update)
         if err != nil {
             log.Println("Failed to delete tag from user:", err.Error())
             responder.WriteError("Server error")
@@ -411,7 +422,7 @@ func DeleteUserTag(user_collection *mongo.Collection, metadata_collection *mongo
 
         metadata_update := bson.M{
             "$pull": bson.M{
-                "tags": del_tag_request,
+                "tags": del_tag_request.Name,
             },
         }
 

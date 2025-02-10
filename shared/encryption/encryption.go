@@ -83,7 +83,7 @@ type EncryptedKey struct {
 func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo_schemes.User) (EncryptedKey, error) {
     recipient_key := user.MainKey
 
-    dh_pub_key, err := ecdh.P256().NewPublicKey(recipient_key.DHPublicKey)
+    dh_pub_key, err := ecdh.X25519().NewPublicKey(recipient_key.DHPublicKey)
     if err != nil {
         return EncryptedKey{}, err
     }

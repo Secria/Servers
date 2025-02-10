@@ -83,7 +83,7 @@ func main() {
     metadata_collection := db.Collection("EmailMetadata");
     usage_collection := db.Collection("Usage")
 
-    dh_priv, err := ecdh.P256().GenerateKey(rand.Reader)
+    dh_priv, err := ecdh.X25519().GenerateKey(rand.Reader)
     if err != nil {
         log.Fatal("Failed to generate dh private key")
     }
@@ -284,6 +284,10 @@ func (s *Session) Data(r io.Reader) error {
     subject := parsed_header.Get("Subject")
     message_id := parsed_header.Get("Message-ID")
     encrypted_email, encryption_key, err := encryption.EncryptEmail(raw_body)
+    if err != nil {
+        log.Println("Failed encrypting email", err)
+        return fmt.Errorf("Server error")
+    }
 
     var attachment_size int64 = 0
     var DbAttachments []mongo_schemes.Attachment

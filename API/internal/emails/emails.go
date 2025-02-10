@@ -198,6 +198,7 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
                 EncryptedKey: v.Metadata.EncryptedKey,
                 CipherText: v.Metadata.Ciphertext,
                 DHPublicKey: v.Email.DHPublicKey,
+                Salt: v.Metadata.Salt,
                 From: v.Metadata.From,
                 MessageId: v.Metadata.MessageId,
                 Headers: v.Email.Headers,

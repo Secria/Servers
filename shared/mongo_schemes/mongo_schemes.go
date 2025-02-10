@@ -71,7 +71,8 @@ type Metadata struct {
     Size int64 `bson:"size"`
     KeyUsed []byte `bson:"key_used"`
     EncryptedKey []byte `bson:"encrypted_key"`
-    Ciphertext[]byte `bson:"mlkem_cipher"`
+    Ciphertext []byte `bson:"mlkem_cipher"`
+    Salt []byte `bson:"salt"`
     UsedAddress string `bson:"used_address"`
     EmailID primitive.ObjectID `bson:"email_id"`
     MessageId string `bson:"message_id" json:"message_id"`

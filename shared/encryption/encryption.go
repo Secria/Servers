@@ -8,7 +8,10 @@ import (
 	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
+	"io"
 	"shared/mongo_schemes"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 func Pkcs7Pad(data []byte, blockSize int) []byte {
@@ -78,6 +81,7 @@ type EncryptedKey struct {
     SecondStageKey []byte 
     CipherText []byte 
     UsedKey []byte
+    Salt []byte
 }
 
 func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo_schemes.User) (EncryptedKey, error) {
@@ -102,7 +106,15 @@ func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo
 
     concatenated := append(mlkem_shared_secret, dh_shared_secret...)
 
-    shared_secret := sha256.Sum256(concatenated)
+    salt := make([]byte, 32)
+    _, err = rand.Read(salt)
+
+    info := []byte("message-key")
+
+    h := hkdf.New(sha256.New, concatenated, salt, info)
+
+    shared_secret := make([]byte, 32)
+    io.ReadFull(h, shared_secret)
 
     encrypted_email_key, err := AesEncryptGCM(shared_secret[:], email_key)
 
@@ -110,5 +122,6 @@ func GenerateEncryptedKey(email_key []byte, dh_priv ecdh.PrivateKey, user *mongo
         SecondStageKey: encrypted_email_key,
         CipherText: ciphertext,
         UsedKey: recipient_key.KeyId,
+        Salt: salt,
     }, nil
 }

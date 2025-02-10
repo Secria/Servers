@@ -380,14 +380,15 @@ func (s *Session) Data(r io.Reader) error {
 
             m := mongo_schemes.Metadata{
                 Size: estimated_size,
+                Ciphertext: ev.CipherText,
+                EncryptedKey: ev.SecondStageKey,
+                Salt: ev.Salt,
                 KeyUsed: ev.UsedKey,
                 UsedAddress: user.Address,
                 EmailID: inserted_id,
                 MessageId: message_id,
                 Subject: subject,
                 From: s.From,
-                Ciphertext: ev.CipherText,
-                EncryptedKey: ev.SecondStageKey,
                 Private: false,
                 Attachment: has_attachment,
             }

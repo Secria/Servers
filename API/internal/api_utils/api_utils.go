@@ -33,6 +33,7 @@ type ResponseEmail struct {
     EncryptedKey []byte `json:"encrypted_key"`
     CipherText []byte `json:"ciphertext"`
     DHPublicKey []byte `json:"dh_public"`
+    Salt []byte `json:"salt"`
     Private bool `json:"private"`
     Sent bool `json:"sent,omitempty"`
     Read bool `json:"read,omitempty"`

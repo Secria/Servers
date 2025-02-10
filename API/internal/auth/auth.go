@@ -73,6 +73,49 @@ func validateHash(stored_password, check_password string) error {
     return nil
 }
 
+type UserAndUsageResponse struct {
+    User mongo_schemes.User `bson:"user"`
+    Usage mongo_schemes.TrackedUsage `bson:"usage"`
+}
+
+func getUserAndUsage(ctx context.Context, user_collection *mongo.Collection, filter bson.D) (api_utils.LoginResponse, error) {
+    filter_stage := bson.D{{Key: "$match", Value: filter}}
+    replace_stage := bson.D{{Key: "$replaceRoot", Value: bson.M{
+        "newRoot": bson.M{
+            "user": "$$ROOT",
+        },
+    }}}
+    join_stage := bson.D{{Key: "$lookup", Value: bson.M{
+        "from": "Usage",
+        "as": "usage",
+        "localField": "user.usage",
+        "foreignField": "_id",
+    }}}
+    clean_stage := bson.D{{Key: "$set", Value: bson.M{
+        "usage": bson.M{
+            "$arrayElemAt": bson.A{"$usage", 0},
+        },
+    }}}
+
+    cur, err := user_collection.Aggregate(ctx, mongo.Pipeline{filter_stage, replace_stage, join_stage, clean_stage})
+    if err != nil {
+        return api_utils.LoginResponse{}, err
+    }
+    defer cur.Close(ctx)
+
+    var user_usage UserAndUsageResponse
+    if cur.Next(ctx) {
+        cur.Decode(&user_usage)
+    } else {
+        return api_utils.LoginResponse{}, fmt.Errorf("No user found")
+    }
+
+    return api_utils.LoginResponse{
+        User: user_usage.User,
+        Usage: user_usage.Usage,
+    }, nil
+}
+
 type LoginRequest struct {
     Email string `json:"email"`
     Password string `json:"password"`
@@ -88,9 +131,8 @@ func Login(user_collection *mongo.Collection, redis_client *redis.Client) http.H
             return
         }
 
-        filter := bson.D{{ Key: "email", Value: login_request.Email }}
-        var user mongo_schemes.User
-        err := user_collection.FindOne(context.Background(), filter).Decode(&user)
+        filter := bson.D{{Key: "email", Value: login_request.Email}}
+        user, err := getUserAndUsage(context.TODO(), user_collection, filter)
 
         if err != nil {
             log.Println("Error finding user:", err.Error())
@@ -139,25 +181,22 @@ func Login(user_collection *mongo.Collection, redis_client *redis.Client) http.H
 
         http.SetCookie(w, &cookie)
 
-        if user.Contacts == nil {
-            responder.WriteData(api_utils.LoginResponse{
-                User: user,
-                Contacts: []api_utils.ContactResponse{},
-            })
-            return
-        }
+        // if user.Contacts == nil {
+        //     responder.WriteData(api_utils.LoginResponse{
+        //         User: user,
+        //         Contacts: []api_utils.ContactResponse{},
+        //     })
+        //     return
+        // }
+        //
+        // contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
+        // if err != nil {
+        //     log.Println("There was an error retrieving the contacts: ", err.Error())
+        //     responder.WriteError("Authentication failed")
+        //     return
+        // }
 
-        contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
-        if err != nil {
-            log.Println("There was an error retrieving the contacts: ", err.Error())
-            responder.WriteError("Authentication failed")
-            return
-        }
-
-        responder.WriteData(api_utils.LoginResponse{
-            User: user,
-            Contacts: contacts,
-        })
+        responder.WriteData(user)
     })
 }
 
@@ -172,7 +211,9 @@ func CheckAuth(redis_client *redis.Client, user_collection *mongo.Collection) ht
         }
 
         cookie_object, err := redis_handler.GetCookieObject(redis_client, session_cookie.Value)
-        user, err := redis_handler.GetUserFromCookie(user_collection, cookie_object)
+
+        filter := bson.D{{Key: "_id", Value: cookie_object.UserId}}
+        user, err := getUserAndUsage(context.TODO(), user_collection, filter)
 
         if err != nil {
             log.Println("Failed to find user from cookie:", err.Error())
@@ -180,25 +221,22 @@ func CheckAuth(redis_client *redis.Client, user_collection *mongo.Collection) ht
             return
         }
 
-        if user.Contacts == nil {
-            responder.WriteData(api_utils.LoginResponse{
-                User: user,
-                Contacts: []api_utils.ContactResponse{},
-            })
-            return
-        }
+        // if user.Contacts == nil {
+        //     responder.WriteData(api_utils.LoginResponse{
+        //         User: user,
+        //         Contacts: []api_utils.ContactResponse{},
+        //     })
+        //     return
+        // }
+        //
+        // contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
+        // if err != nil {
+        //     log.Println("There was an error retrieving the contacts:", err.Error())
+        //     responder.WriteError("Authentication failed")
+        //     return
+        // }
 
-        contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
-        if err != nil {
-            log.Println("There was an error retrieving the contacts:", err.Error())
-            responder.WriteError("Authentication failed")
-            return
-        }
-
-        responder.WriteData(api_utils.LoginResponse{
-            User: user,
-            Contacts: contacts,
-        })
+        responder.WriteData(user)
     })
 }
 

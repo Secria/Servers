@@ -2,22 +2,40 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	attachment "secria_api/internal"
 	"secria_api/internal/auth"
 	"secria_api/internal/emails"
-	"secria_api/internal/proxy"
 	"secria_api/internal/middleware"
+	"secria_api/internal/proxy"
 	"secria_api/internal/totp"
 	"secria_api/internal/user"
 	"time"
 
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+func CreateBucket(client *minio.Client) {
+    err := client.MakeBucket(context.TODO(), BUCKET_NAME, minio.MakeBucketOptions{Region: REGION})
+    if err != nil {
+        exists, errBucketExists := client.BucketExists(context.TODO(), BUCKET_NAME)
+        if errBucketExists == nil && exists {
+            log.Println("We already own", BUCKET_NAME)
+        } else {
+            log.Fatalln(err)
+        }
+    }
+    fmt.Println("Bucket created: ", BUCKET_NAME)
+}
+
 
 var CORS_HEADER string
 var DOMAIN string
@@ -25,11 +43,21 @@ var ENV string
 var MONGO_URI string
 var REDIS_HOST string
 var CAPTCHA_SECRET string
+var S3_ENDPOINT string
+var ACCESS_KEY_ID string
+var SECRET_ACCESS_KEY string
+var BUCKET_NAME string
+var REGION string
 
 func main() {
     ENV = os.Getenv("ENVIRONMENT")
     MONGO_URI = os.Getenv("MONGO_URI");
     CAPTCHA_SECRET = os.Getenv("CAPTCHA_SECRET")
+    S3_ENDPOINT = os.Getenv("S3_ENDPOINT")
+    ACCESS_KEY_ID = os.Getenv("ACCESS_KEY_ID")
+    SECRET_ACCESS_KEY = os.Getenv("SECRET_ACCESS_KEY")
+    BUCKET_NAME = os.Getenv("BUCKET_NAME")
+    REGION = os.Getenv("REGION")
 
     if ENV == "DEV" {
         CORS_HEADER = "http://localhost:8080"
@@ -37,6 +65,17 @@ func main() {
     }
 
     log.Println("Environment:", ENV)
+
+    minio_client, err := minio.New(S3_ENDPOINT, &minio.Options{
+        Creds: credentials.NewStaticV4(ACCESS_KEY_ID, SECRET_ACCESS_KEY, ""),
+        Secure: false,
+    })
+    if err != nil {
+        log.Fatalln(err)
+    }
+
+    CreateBucket(minio_client)
+
 
     redis_address := "redis:6379"
     redis_password := ""
@@ -78,7 +117,7 @@ func main() {
     // /auth
     auth_router := http.NewServeMux()
     auth_router.Handle("POST /login", auth.Login(user_collection, redis_client))
-    auth_router.Handle("POST /mfa", totp.LoginCheckTOTP(redis_client, user_collection))
+    // auth_router.Handle("POST /mfa", totp.LoginCheckTOTP(redis_client, user_collection))
     auth_router.Handle("POST /register", auth.Register(ENV, user_collection, usage_collection, CAPTCHA_SECRET))
     auth_router.Handle("GET /check", auth.CheckAuth(redis_client, user_collection))
     auth_router.HandleFunc("GET /logout", auth.Logout)
@@ -125,6 +164,8 @@ func main() {
     image_router.HandleFunc("GET /image", proxy.ImageProxy)
 
     router.Handle("/proxy/", http.StripPrefix("/proxy", middleware.CookieAuth(redis_client, user_collection)(image_router)))
+
+    router.Handle("GET /attachment", attachment.DownloadAttachment(minio_client, BUCKET_NAME))
 
     server := http.Server {
         Addr: ":8000",

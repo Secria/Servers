@@ -139,7 +139,7 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
         }
 
         match_stage := bson.D{{Key: "$match", Value: filter}}
-        sort_stage := bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}}
+        sort_stage := bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}}
         replace_stage := bson.D{{Key: "$replaceRoot", Value: bson.M{
             "newRoot": bson.M{
                 "metadata": "$$ROOT",
@@ -191,6 +191,8 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
         var emails []api_utils.ResponseEmail = make([]api_utils.ResponseEmail, 0)
         for _, v := range emails_response.Data {
             emails = append(emails, api_utils.ResponseEmail{
+                Id: v.Metadata.Id,
+                EmailId: v.Email.Id,
                 Encryption: v.Email.Encryption,
                 KeyUsed: v.Metadata.KeyUsed,
                 EncryptedKey: v.Metadata.EncryptedKey,
@@ -206,6 +208,7 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
                 Starred: v.Metadata.Starred,
                 Deleted: v.Metadata.Deleted,
                 Tags: v.Metadata.Tags,
+                Attachments: v.Email.Attachments,
             })
         }
 

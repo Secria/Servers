@@ -23,6 +23,7 @@ type ContactResponse struct {
 
 type ResponseEmail struct {
     Id primitive.ObjectID `json:"id"`
+    EmailId primitive.ObjectID `json:"email_id"`
     Encryption int `json:"encryption"`
     KeyUsed []byte `json:"used_key"`
     From string `json:"from"`
@@ -38,12 +39,13 @@ type ResponseEmail struct {
     Starred bool `json:"starred,omitempty"`
     Deleted bool `json:"deleted,omitempty"`
     Tags []string `json:"tags,omitempty"`
+    Attachments []mongo_schemes.Attachment `json:"attachments,omitempty"`
     Timestamp time.Time `json:"timestamp"`
 }
 
 type LoginResponse struct {
-    User mongo_schemes.User `json:"user"`
-    Contacts []ContactResponse `json:"contacts"`
+    mongo_schemes.User
+    Usage mongo_schemes.TrackedUsage `json:"usage"`
 }
 
 type APIResponseData[T any] struct {

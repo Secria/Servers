@@ -7,7 +7,7 @@ import (
 	"log"
 	"net/http"
 	"secria_api/internal/api_utils"
-	"secria_api/internal/redis_handler"
+	// "secria_api/internal/redis_handler"
 	"shared/mongo_schemes"
 	"time"
 
@@ -153,90 +153,90 @@ func addAttemptToSession(ctx context.Context, mfa_attempt_client *redis.Client, 
     return nil
 }
 
-func LoginCheckTOTP(redis_client *redis.Client, user_collection *mongo.Collection) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        user := r.Context().Value("user").(mongo_schemes.User)
-        responder := api_utils.NewJsonResponder[api_utils.LoginResponse](w)
-
-        code, err := api_utils.DecodeJson[CodeRequest](r.Body)
-        if err != nil {
-            log.Println("Malformed request: ", err.Error())
-            responder.WriteError("Malformed request")
-            return
-        }
-
-        stored_data, err := redis_client.Get(context.TODO(), fmt.Sprintf("otp:%s", user.Id.Hex())).Result()
-        if err != nil {
-            log.Println("Couldn't retrieve mfa attempt: ", err.Error())
-            responder.WriteError("MFA attempt not found")
-            return
-        }
-
-        mfa_attempt, err := api_utils.UnmarshalJson[StoredMfaAttempt]([]byte(stored_data))
-        if err != nil {
-            log.Println("Failed to decode mfa attempt: ", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
-
-        if mfa_attempt.Attempts >= 5 {
-            log.Println("Attempt limit overpassed")
-            responder.WriteError("Too many attempts")
-            return
-        }
-
-        if mfa_attempt.Request != "login" {
-            log.Println("This mfa request is not for login: ", mfa_attempt.Request)
-            responder.WriteError("Invalid session")
-            return
-        }
-
-        valid := totp.Validate(code.Code, user.TOTPSecret)
-        if !valid {
-            log.Println("Invalid code provided for login")
-            responder.WriteError("Invalid code")
-            go addAttemptToSession(context.TODO(), redis_client, user.Id, mfa_attempt)
-            return
-        }
-
-        err = redis_client.Del(context.TODO(), fmt.Sprintf("otp:%s", user.Id.Hex())).Err()
-        if err != nil {
-            log.Println("Couldn't delete mfa attempt", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
-        cookie, err := redis_handler.GenerateCookie(redis_client, user.Id)
-        if err != nil {
-            log.Println("There was an error generating the cookie: ", err.Error())
-            responder.WriteError("Authentication failed")
-            return
-        }
-
-        http.SetCookie(w, &cookie)
-
-        if user.Contacts == nil {
-            responder.WriteData(api_utils.LoginResponse{
-                User: user,
-                Contacts: []api_utils.ContactResponse{},
-            })
-            return
-        }
-
-        contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
-        if err != nil {
-            log.Println("There was an error retrieving the contacts: ", err.Error())
-            responder.WriteError("Authentication failed")
-            return
-        }
-
-        responder.WriteData(api_utils.LoginResponse{
-            User: user,
-            Contacts: contacts,
-        })
-    })
-}
+// func LoginCheckTOTP(redis_client *redis.Client, user_collection *mongo.Collection) http.Handler {
+//     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+//         user := r.Context().Value("user").(mongo_schemes.User)
+//         responder := api_utils.NewJsonResponder[api_utils.LoginResponse](w)
+//
+//         code, err := api_utils.DecodeJson[CodeRequest](r.Body)
+//         if err != nil {
+//             log.Println("Malformed request: ", err.Error())
+//             responder.WriteError("Malformed request")
+//             return
+//         }
+//
+//         stored_data, err := redis_client.Get(context.TODO(), fmt.Sprintf("otp:%s", user.Id.Hex())).Result()
+//         if err != nil {
+//             log.Println("Couldn't retrieve mfa attempt: ", err.Error())
+//             responder.WriteError("MFA attempt not found")
+//             return
+//         }
+//
+//         mfa_attempt, err := api_utils.UnmarshalJson[StoredMfaAttempt]([]byte(stored_data))
+//         if err != nil {
+//             log.Println("Failed to decode mfa attempt: ", err.Error())
+//             responder.WriteError("Server error")
+//             return
+//         }
+//
+//
+//         if mfa_attempt.Attempts >= 5 {
+//             log.Println("Attempt limit overpassed")
+//             responder.WriteError("Too many attempts")
+//             return
+//         }
+//
+//         if mfa_attempt.Request != "login" {
+//             log.Println("This mfa request is not for login: ", mfa_attempt.Request)
+//             responder.WriteError("Invalid session")
+//             return
+//         }
+//
+//         valid := totp.Validate(code.Code, user.TOTPSecret)
+//         if !valid {
+//             log.Println("Invalid code provided for login")
+//             responder.WriteError("Invalid code")
+//             go addAttemptToSession(context.TODO(), redis_client, user.Id, mfa_attempt)
+//             return
+//         }
+//
+//         err = redis_client.Del(context.TODO(), fmt.Sprintf("otp:%s", user.Id.Hex())).Err()
+//         if err != nil {
+//             log.Println("Couldn't delete mfa attempt", err.Error())
+//             responder.WriteError("Server error")
+//             return
+//         }
+//
+//         cookie, err := redis_handler.GenerateCookie(redis_client, user.Id)
+//         if err != nil {
+//             log.Println("There was an error generating the cookie: ", err.Error())
+//             responder.WriteError("Authentication failed")
+//             return
+//         }
+//
+//         http.SetCookie(w, &cookie)
+//
+//         if user.Contacts == nil {
+//             responder.WriteData(api_utils.LoginResponse{
+//                 User: user,
+//                 Contacts: []api_utils.ContactResponse{},
+//             })
+//             return
+//         }
+//
+//         contacts, err := api_utils.RetrieveContacts(context.Background(), user_collection, user.Contacts)
+//         if err != nil {
+//             log.Println("There was an error retrieving the contacts: ", err.Error())
+//             responder.WriteError("Authentication failed")
+//             return
+//         }
+//
+//         responder.WriteData(api_utils.LoginResponse{
+//             User: user,
+//             Contacts: contacts,
+//         })
+//     })
+// }
 
 func ValidateTOTP(code string, secret string) bool {
     return totp.Validate(code, secret)

@@ -45,10 +45,10 @@ type UserPlanConfig struct {
 
 type TrackedUsage struct {
     Id primitive.ObjectID `bson:"_id,omitempty"`
-    Email string `bson:"email"`
+    Email string `bson:"email" json:"-"`
     UsedSpace int `bson:"used_space" json:"used_space"`
     SentEmails int `bson:"sent_emails" json:"sent_emails"`
-    ResetDate time.Time `bson:"reset_date"`
+    ResetDate time.Time `bson:"reset_date" json:"-"`
 }
 
 type User struct {
@@ -84,6 +84,14 @@ type Metadata struct {
     Archived bool `bson:"archived,omitempty"`
     Tags []string `bson:"tags,omitempty"`
     Deleted bool `bson:"deleted,omitempty"`
+    Attachment bool `bson:"attachment,omitempty"`
+}
+
+type Attachment struct {
+    Filename string `bson:"filename" json:"filename"`
+    ContentType string `bson:"content_type" json:"content_type"`
+    Size int64 `bson:"size" json:"size"`
+    Reference string `bson:"reference" json:"reference"`
 }
 
 type Email struct {
@@ -94,4 +102,5 @@ type Email struct {
     FromId primitive.ObjectID `bson:"from_id"`
     Headers string `bson:"headers" json:"headers"`
     Body []byte `bson:"body" json:"body"`
+    Attachments []Attachment `bson:"attachments,omitempty"`
 }

@@ -116,12 +116,13 @@ func GenerateShareCode(redis_client *redis.Client, user primitive.ObjectID) (str
 }
 
 func GetUserFromSharedCode(redis_client *redis.Client, user_collection *mongo.Collection, shared_code string) (mongo_schemes.User, error) {
-    user_id_string, err := redis_client.Get(context.Background(), shared_code).Result()
+    cache_key := fmt.Sprintf("code:%s", shared_code)
+    user_id_string, err := redis_client.Get(context.Background(), cache_key).Result()
     if err != nil {
         return mongo_schemes.User{}, err
     }
 
-    err = redis_client.Del(context.TODO(), fmt.Sprintf("code:%s", user_id_string)).Err()
+    err = redis_client.Del(context.TODO(), cache_key).Err()
     if err != nil {
         return mongo_schemes.User{}, err
     }

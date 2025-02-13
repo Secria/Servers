@@ -138,7 +138,11 @@ func main() {
     required_auth_router.Handle("POST /tags", user.AddUserTag(user_collection))
     required_auth_router.Handle("POST /delete_tag", user.DeleteUserTag(user_collection, metadata_collection))
 
+    required_auth_router.Handle("POST /keys", user.GetAddressInfo(user_collection))
     required_auth_router.Handle("POST /send_private", emails.SendEmail(user_collection, metadata_collection, email_collection, usage_collection, &metadata_size))
+    required_auth_router.Handle("POST /draft", emails.StoreDraft(user_collection, metadata_collection, email_collection, usage_collection, &metadata_size))
+    required_auth_router.Handle("POST /empty", emails.CreateEmptyDraft(metadata_collection, email_collection, usage_collection))
+    required_auth_router.Handle("POST /upload", emails.UploadFile(minio_client, BUCKET_NAME, metadata_collection, email_collection, usage_collection))
     //required_auth_router.Handle("POST /send_public", emails.SendPublic(user_collection, metadata_collection, email_collection))
     required_auth_router.Handle("GET /query", emails.QueryEmails(metadata_collection, email_collection))
 
@@ -239,6 +243,15 @@ func initializeDB(ctx context.Context, client *mongo.Client) {
         Keys: bson.D{{Key: "addressess", Value: 1}},
     }
     _, err = user_collection.Indexes().CreateOne(ctx, user_index)
+    if err != nil {
+        log.Fatal("Couldn't index the collection", err.Error())
+    }
+
+    usage_collection := db.Collection("Usage")
+    usage_index := mongo.IndexModel{
+        Keys: bson.D{{Key: "email", Value: 1}},
+    }
+    _, err = usage_collection.Indexes().CreateOne(ctx, usage_index)
     if err != nil {
         log.Fatal("Couldn't index the collection", err.Error())
     }

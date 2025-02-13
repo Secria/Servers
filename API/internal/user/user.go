@@ -17,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func GenerateAddContactCode(redis_client *redis.Client) http.Handler {
@@ -310,6 +311,52 @@ func RotateAddress(user_collection *mongo.Collection) http.Handler {
         }
 
         responder.WriteData(random_address)
+    })
+}
+
+type GetAddressInfoRequest struct {
+    Users []string `json:"users"`
+}
+
+func GetAddressInfo(user_collection *mongo.Collection) http.HandlerFunc {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        responder := api_utils.NewJsonResponder[[]api_utils.ContactResponse](w)
+
+        request, err := api_utils.DecodeJson[GetAddressInfoRequest](r.Body)
+        if err != nil {
+            log.Println("Error decoding users", err)
+            responder.WriteError("Malformed request")
+            return
+        }
+
+        filter := bson.D{{Key: "email", Value: bson.M{"$in": request.Users}}}
+        projection := bson.M{"email": 1, "name": 1, "main_key.mlkem_public_key": 1, "main_key.dh_public_key": 1}
+        cur, err := user_collection.Find(context.TODO(), filter, options.Find().SetProjection(projection))
+        if err != nil {
+            log.Println("Error retrieving address info", err)
+            responder.WriteError("Server error")
+            return
+        }
+        defer cur.Close(context.TODO())
+
+        var users []mongo_schemes.User
+        if err := cur.All(context.TODO(), &users); err != nil {
+            log.Println("Error decoding users", err)
+            responder.WriteError("Server error")
+            return
+        }
+
+        var response_contacts []api_utils.ContactResponse = make([]api_utils.ContactResponse, 0)
+        for _, u := range users {
+            response_contacts = append(response_contacts, api_utils.ContactResponse{
+                Name: u.Name,
+                Email: u.MainEmail,
+                MLKEMPublicKey: u.MainKey.MLKEMPublicKey,
+                DHPublicKey: u.MainKey.DHPublicKey,
+            })
+        }
+
+        responder.WriteData(response_contacts)
     })
 }
 

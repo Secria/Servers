@@ -39,6 +39,7 @@ type ResponseEmail struct {
     Read bool `json:"read,omitempty"`
     Starred bool `json:"starred,omitempty"`
     Deleted bool `json:"deleted,omitempty"`
+    Draft bool `json:"draft,omitempty"`
     Tags []string `json:"tags,omitempty"`
     Attachments []mongo_schemes.Attachment `json:"attachments,omitempty"`
     Timestamp time.Time `json:"timestamp"`

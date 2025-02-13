@@ -10,8 +10,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-func GetUsage(ctx context.Context, usage_collection *mongo.Collection, user_id primitive.ObjectID) (mongo_schemes.TrackedUsage, error) {
-    filter := bson.D{{Key: "user_id", Value: user_id}}
+func GetUsage(ctx context.Context, usage_collection *mongo.Collection, user_email string) (mongo_schemes.TrackedUsage, error) {
+    filter := bson.D{{Key: "email", Value: user_email}}
 
     var usage mongo_schemes.TrackedUsage
     if err := usage_collection.FindOne(ctx, filter).Decode(&usage); err != nil {

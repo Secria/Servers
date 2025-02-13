@@ -361,7 +361,7 @@ func (s *Session) Data(r io.Reader) error {
     for i := range s.To {
         user := &s.To[i]
 
-        usage, err := usage.GetUsage(context.TODO(), s.Backend.UsageCollection, user.Id)
+        usage, err := usage.GetUsage(context.TODO(), s.Backend.UsageCollection, user.MainEmail)
         if err != nil {
         }
 

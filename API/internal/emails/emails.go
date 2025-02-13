@@ -11,12 +11,14 @@ import (
 	"regexp"
 	"secria_api/internal/api_utils"
 	"shared/mongo_schemes"
-    "shared/usage"
+	"shared/usage"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -32,6 +34,88 @@ type QueryDBResponse struct {
     Count int `bson:"count"`
 }
 
+func getEmailByFilter(ctx context.Context, metadata_collection *mongo.Collection, filter interface{}) (EmailDBResponse, error) {
+        match_stage := bson.D{{Key: "$match", Value: filter}}
+        limit_stage := bson.D{{Key: "$limit", Value: 1}}
+        replace_stage := bson.D{{Key: "$replaceRoot", Value: bson.M{
+            "newRoot": bson.M{
+                "metadata": "$$ROOT",
+            },
+        }}}
+        lookup_stage := bson.D{{Key: "$lookup", Value: bson.M{
+            "from": "Emails",
+            "localField": "metadata.email_id",
+            "foreignField": "_id",
+            "as": "email",
+        }}}
+        cleanup_stage := bson.D{{Key: "$set", Value: bson.M{"email": bson.M{"$arrayElemAt": bson.A{"$email", 0}}}}}
+        cur, err := metadata_collection.Aggregate(ctx, mongo.Pipeline{match_stage, limit_stage, replace_stage, lookup_stage, cleanup_stage})
+
+        if err != nil {
+            return EmailDBResponse{}, err
+        }
+        defer cur.Close(ctx)
+
+        var emails_response EmailDBResponse
+
+        if cur.Next(ctx) {
+            if err := cur.Decode(&emails_response); err != nil {
+                return EmailDBResponse{}, err
+            }
+        } else {
+            return EmailDBResponse{}, err
+        }
+        return emails_response, nil
+}
+
+func getEmailsAndCountByFilter(ctx context.Context, metadata_collection *mongo.Collection, filter interface{}, skip int, count int) (QueryDBResponse, error) {
+        match_stage := bson.D{{Key: "$match", Value: filter}}
+        sort_stage := bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: -1}}}}
+        replace_stage := bson.D{{Key: "$replaceRoot", Value: bson.M{
+            "newRoot": bson.M{
+                "metadata": "$$ROOT",
+            },
+        }}}
+        lookup_stage := bson.D{{Key: "$lookup", Value: bson.M{
+            "from": "Emails",
+            "localField": "metadata.email_id",
+            "foreignField": "_id",
+            "as": "email",
+        }}}
+        cleanup_stage := bson.D{{Key: "$set", Value: bson.M{"email": bson.M{"$arrayElemAt": bson.A{"$email", 0}}}}}
+        separate_calc_stage := bson.D{{Key: "$facet", Value: bson.M{
+            "data": bson.A{
+                bson.D{{Key: "$skip", Value: skip}},
+                bson.D{{Key: "$limit", Value: count}},
+            },
+            "count": bson.A{
+                bson.D{{Key: "$count", Value: "count"}},
+            },
+        }}}
+        replace_count_stage := bson.D{{Key: "$set", Value: bson.M{
+            "count": bson.M{
+                "$arrayElemAt": bson.A{"$count.count", 0},
+            },
+        }}}
+        cur, err := metadata_collection.Aggregate(ctx, mongo.Pipeline{match_stage, sort_stage, replace_stage, lookup_stage, cleanup_stage, separate_calc_stage, replace_count_stage})
+
+        if err != nil {
+            return QueryDBResponse{}, err
+        }
+        defer cur.Close(context.TODO())
+
+        var emails_response QueryDBResponse
+
+        if cur.Next(context.TODO()) {
+            if err := cur.Decode(&emails_response); err != nil {
+                return QueryDBResponse{}, err
+            }
+        } else {
+            return QueryDBResponse{}, err
+        }
+        return emails_response, nil
+}
+
 func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.Collection) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         responder := api_utils.NewJsonResponder[[]api_utils.ResponseEmail](w)
@@ -42,6 +126,7 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
         skip_str := query.Get("skip")
         sent_str, sent := query["sent"]
         starred_str, starred := query["starred"]
+        read_str, read := query["read"]
         public_str, public := query["public"]
         used_address_str, used_address := query["address"]
         tags_str, tags := query["tag"]
@@ -49,6 +134,7 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
         _, deleted := query["deleted"]
         _, draft := query["draft"]
         _, archived := query["archived"]
+        _, attachment := query["attachment"]
         message_id, search_by_id := query["message_id"]
 
         var count, skip int
@@ -83,6 +169,18 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
                 filter = append(filter, bson.E{Key: "archived", Value: true})
             } else {
                 filter = append(filter, bson.E{Key: "archived", Value: bson.M{"$exists": false}})
+            }
+
+            if read {
+                if read_str[0] == "true" {
+                    filter = append(filter, bson.E{Key: "read", Value: true})
+                } else {
+                    filter = append(filter, bson.E{Key: "read", Value: bson.M{"$exists": false}})
+                }
+            }
+
+            if attachment {
+                filter = append(filter, bson.E{Key: "attachment", Value: true})
             }
 
             if draft {
@@ -208,6 +306,7 @@ func QueryEmails(metadata_collection *mongo.Collection, email_collection *mongo.
                 Read: v.Metadata.Read,
                 Starred: v.Metadata.Starred,
                 Deleted: v.Metadata.Deleted,
+                Draft: v.Metadata.Draft,
                 Tags: v.Metadata.Tags,
                 Attachments: v.Email.Attachments,
             })
@@ -223,6 +322,7 @@ type EncryptRecipient struct {
     KeyUsed []byte `json:"key_used"`
     Ciphertext []byte `json:"ciphertext"`
     EncryptedKey []byte `json:"encrypted_key"`
+    Salt []byte `json:"salt"`
     Sender bool `json:"sender"`
     To bool `json:"to"`
     CC bool `json:"cc"`
@@ -235,11 +335,13 @@ type SendRequest struct {
     To []EncryptRecipient `json:"to"`
     Subject string `json:"subject"`
     Body []byte `json:"body"`
+    PublicKey []byte `json:"public_key"`
     PlaintextBody string `json:"plaintext"`
     ContentType string `json:"content_type"`
     Boundary string `json:"boundary"`
     InReplyTo string `json:"in_reply_to"`
     References string `json:"references"`
+    DraftId string `json:"draft_id"`
 }
 
 func check_array_match[T comparable](array []T, value T) bool {
@@ -281,7 +383,7 @@ func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Co
         responder := api_utils.NewJsonResponder[string](w)
         user := r.Context().Value("user").(mongo_schemes.User)
 
-        tracked_usage, err := usage.GetUsage(context.TODO(), usage_collection, user.Id)
+        tracked_usage, err := usage.GetUsage(context.TODO(), usage_collection, user.MainEmail)
         if err != nil {
             log.Println("Error retrieving usage:", err.Error())
             responder.WriteError("Server error")
@@ -320,6 +422,12 @@ func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Co
         if len(to_emails) == 0 {
             log.Println("Tried to send an email without to recipients")
             responder.WriteError("No recipients specified")
+            return
+        }
+
+        if len(plaintext_emails) > 0 && send_request.PlaintextBody == "" {
+            log.Println("No body provided for unencrypted recipients")
+            responder.WriteError("No plaintext body for outbounds recipients")
             return
         }
         
@@ -361,6 +469,7 @@ func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Co
         email := mongo_schemes.Email{
             Id: email_id,
             From: user.MainEmail,
+            DHPublicKey: send_request.PublicKey,
             Encryption: mongo_schemes.Encryption_ECDH_MLKEM,
             Body: send_request.Body,
             Headers: headers,
@@ -377,12 +486,53 @@ func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Co
 
         raw_email := bson.Raw(email_bson)
 
-        _, err = email_collection.InsertOne(context.Background(), raw_email)
+        if send_request.DraftId != "" {
+            draft_id, err := primitive.ObjectIDFromHex(send_request.DraftId)
+            if err != nil {
+                log.Println("Error decoding draft id", err)
+                responder.WriteError("Malformed request")
+                return
+            }
 
-        if err != nil {
-            log.Println("There was an error creating the email:", err.Error())
-            responder.WriteError("Server error")
-            return
+            filter := bson.D{{Key: "_id", Value: draft_id}}
+            var draft_metadata mongo_schemes.Metadata
+            err = metadata_collection.FindOneAndDelete(context.TODO(), filter).Decode(&draft_metadata)
+            if err != nil {
+                log.Println("Error deleting metadata", err)
+                responder.WriteError("Server error")
+                return
+            }
+
+            email_id = draft_metadata.EmailID
+            email_filter := bson.D{{Key: "_id", Value: draft_metadata.EmailID}}
+            update_field := bson.M{
+                    "from": email.From,
+                    "dh_public": send_request.PublicKey,
+                    "encryption": send_request.Encryption,
+                    "body": send_request.Body,
+                    "headers": headers,
+            }
+            if draft_metadata.Attachment {
+                update_field["attachment"] = true
+            }
+            update := bson.D{{Key: "$set", Value: update_field}}
+
+            var draft_email mongo_schemes.Email
+            err = email_collection.FindOneAndUpdate(context.TODO(), email_filter, update).Decode(&draft_email)
+            if err != nil {
+                log.Println("Error updating draft", err)
+                responder.WriteError("Server error")
+                return
+            }
+            estimated_size += draft_email.AttachmentSize
+        } else {
+            _, err = email_collection.InsertOne(context.Background(), raw_email)
+
+            if err != nil {
+                log.Println("There was an error creating the email:", err.Error())
+                responder.WriteError("Server error")
+                return
+            }
         }
 
         var metadata []interface{}
@@ -391,13 +541,14 @@ func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Co
                 UsedAddress: u.Email,
                 Size: estimated_size,
                 KeyUsed: u.KeyUsed,
+                EncryptedKey: u.EncryptedKey,
+                Ciphertext: u.Ciphertext,
+                Salt: u.Salt,
                 EmailID: email_id,
                 Subject: send_request.Subject,
                 MessageId: message_id,
                 From: user.MainEmail,
                 Private: true,
-                EncryptedKey: u.EncryptedKey,
-                Ciphertext: u.Ciphertext,
             }
             if u.Sender {
                 m.Sent = true
@@ -412,21 +563,367 @@ func SendEmail(users_collection *mongo.Collection, metadata_collection *mongo.Co
             return
         }
 
-        err = usage.IncrementUsageSize(context.TODO(), usage_collection, encrypted_emails, estimated_size) // Update other users
-        if err != nil {
-            log.Println("Error updating used size:", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
-
-        err = usage.IncrementSentUsage(context.TODO(), usage_collection, user.Usage, estimated_size)
-        if err != nil {
-            log.Println("Error updating usage for sender: ", err.Error())
-            responder.WriteError("Server error")
-            return
-        }
+        // err = usage.IncrementUsageSize(context.TODO(), usage_collection, encrypted_emails, estimated_size) // Update other users
+        // if err != nil {
+        //     log.Println("Error updating used size:", err.Error())
+        //     responder.WriteError("Server error")
+        //     return
+        // }
+        //
+        // err = usage.IncrementSentUsage(context.TODO(), usage_collection, user.Usage, estimated_size)
+        // if err != nil {
+        //     log.Println("Error updating usage for sender: ", err.Error())
+        //     responder.WriteError("Server error")
+        //     return
+        // }
 
         responder.WriteData("Email sent correctly")
+    })
+}
+
+type StoreDraftRequest struct {
+    Encryption int `json:"encryption"`
+    KeyUsed []byte `json:"key_used"`
+    EncryptedKey []byte `json:"encrypted_key"`
+    Salt []byte `json:"salt"`
+    To []string `json:"to"`
+    CC []string `json:"cc"`
+    BCC []string `json:"bcc"`
+    Subject string `json:"subject"`
+    Body []byte `json:"body"`
+    ContentType string `json:"content_type"`
+    Boundary string `json:"boundary"`
+    InReplyTo string `json:"in_reply_to"`
+    References string `json:"references"`
+    DraftId string `json:"draft_id"`
+}
+
+func StoreDraft(users_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, usage_collection *mongo.Collection, metadata_size *int64) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        responder := api_utils.NewJsonResponder[string](w)
+        user := r.Context().Value("user").(mongo_schemes.User)
+
+        tracked_usage, err := usage.GetUsage(context.TODO(), usage_collection, user.MainEmail)
+        if err != nil {
+            log.Println("Error retrieving usage:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        if tracked_usage.UsedSpace >= user.PlanConfig.SpaceLimit {
+            responder.WriteError("You can't send or recieve, you don't have storage")
+            return
+        }
+
+        store_draft_request, err := api_utils.DecodeJson[StoreDraftRequest](r.Body)
+        if err != nil {
+            log.Println("Error decoding request:", err.Error())
+            responder.WriteError("Invalid request body")
+            return
+        }
+
+        var to_emails []EncryptRecipient
+        var cc_emails []EncryptRecipient
+        for _, r := range store_draft_request.To {
+            to_emails = append(to_emails, EncryptRecipient{Email: r})
+        }
+        for _, r := range store_draft_request.CC {
+            cc_emails = append(cc_emails, EncryptRecipient{Email: r})
+        }
+        
+        email_id := primitive.NewObjectID()
+        message_id := fmt.Sprintf("<%s@secria.me>", email_id.Hex()) // Change when more domains are allowed
+
+        headers := fmt.Sprintf("From: \"%s\" <%s>\r\n", user.Name, user.MainEmail)
+        headers += fmt.Sprintf("To:%s\r\n", list_email_header_format(to_emails))
+        if len(cc_emails) != 0 {
+            headers += fmt.Sprintf("CC:%s\r\n", list_email_header_format(cc_emails)) // First space is included in the function
+        }
+        if len(store_draft_request.Subject) != 0 {
+            headers += fmt.Sprintf("Subject: %s\r\n", store_draft_request.Subject)
+        }
+        headers += fmt.Sprintf("Date: %s\r\n", time.Now().Format(time.RFC1123Z))
+        headers += fmt.Sprintf("Message-Id: %s\r\n", message_id)
+
+        if store_draft_request.InReplyTo != "" {
+            headers += fmt.Sprintf("In-Reply-To: %s", store_draft_request.InReplyTo)
+            if store_draft_request.References != "" {
+                headers += fmt.Sprintf("References: %s %s", store_draft_request.InReplyTo, store_draft_request.References)
+            }
+        }
+
+        if !check_valid_boundary(store_draft_request.Boundary) {
+            log.Println("Bad boundary format: ", store_draft_request.Boundary)
+            responder.WriteError("Bad boundary format")
+            return
+        }
+
+        if store_draft_request.ContentType == "multipart/mixed" || store_draft_request.ContentType == "multipart/alternative" {
+            headers += fmt.Sprintf("Content-Type: %s; boundary=%s", store_draft_request.ContentType, store_draft_request.Boundary)
+        }
+
+        email := mongo_schemes.Email{
+            Id: email_id,
+            From: user.MainEmail,
+            Encryption: mongo_schemes.Encryption_ECDH_MLKEM,
+            Body: store_draft_request.Body,
+            Headers: headers,
+        }
+
+        email_bson, err := bson.Marshal(email)
+        if err != nil {
+            log.Println("There was an error creating the email:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        estimated_size := int64(len(email_bson)) + *metadata_size
+
+        raw_email := bson.Raw(email_bson)
+
+        if store_draft_request.DraftId != "" {
+            draft_id, err := primitive.ObjectIDFromHex(store_draft_request.DraftId)
+            if err != nil {
+                log.Println("Error decoding draft id", err)
+                responder.WriteError("Malformed request")
+                return
+            }
+
+            filter := bson.D{{Key: "_id", Value: draft_id}}
+            var draft_metadata mongo_schemes.Metadata
+            err = metadata_collection.FindOneAndDelete(context.TODO(), filter).Decode(&draft_metadata)
+            if err != nil {
+                log.Println("Error deleting metadata", err)
+                responder.WriteError("Server error")
+                return
+            }
+
+            email_id = draft_metadata.EmailID
+            email_filter := bson.D{{Key: "_id", Value: draft_metadata.EmailID}}
+            update_field := bson.M{
+                    "from": email.From,
+                    "encryption": store_draft_request.Encryption,
+                    "body": store_draft_request.Body,
+                    "headers": headers,
+            }
+            if draft_metadata.Attachment {
+                update_field["attachment"] = true
+            }
+            update := bson.D{{Key: "$set", Value: update_field}}
+            var draft_email mongo_schemes.Email
+            err = email_collection.FindOneAndUpdate(context.TODO(), email_filter, update).Decode(&draft_email)
+            if err != nil {
+                log.Println("Error updating draft", err)
+                responder.WriteError("Server error")
+                return
+            }
+            estimated_size += draft_email.AttachmentSize
+        } else {
+            _, err = email_collection.InsertOne(context.Background(), raw_email)
+
+            if err != nil {
+                log.Println("There was an error creating the email:", err.Error())
+                responder.WriteError("Server error")
+                return
+            }
+        }
+
+        m := mongo_schemes.Metadata{
+            UsedAddress: user.MainEmail,
+            Size: estimated_size,
+            KeyUsed: store_draft_request.KeyUsed,
+            EncryptedKey: store_draft_request.EncryptedKey,
+            Salt: store_draft_request.Salt,
+            EmailID: email_id,
+            Subject: store_draft_request.Subject,
+            MessageId: message_id,
+            From: user.MainEmail,
+            Draft: true,
+        }
+
+        res, err := metadata_collection.InsertOne(context.Background(), m)
+        if err != nil {
+            log.Println("There was an error creating the email metadata:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+        metadata_id := res.InsertedID.(primitive.ObjectID)
+
+        // err = usage.IncrementUsageSize(context.TODO(), usage_collection, encrypted_emails, estimated_size) // Update other users
+        // if err != nil {
+        //     log.Println("Error updating used size:", err.Error())
+        //     responder.WriteError("Server error")
+        //     return
+        // }
+        //
+        // err = usage.IncrementSentUsage(context.TODO(), usage_collection, user.Usage, estimated_size)
+        // if err != nil {
+        //     log.Println("Error updating usage for sender: ", err.Error())
+        //     responder.WriteError("Server error")
+        //     return
+        // }
+
+
+        responder.WriteData(metadata_id.Hex())
+    })
+}
+
+type CreateEmptyDraftRequest struct {
+    Encryption int `json:"encryption"`
+    KeyUsed []byte `json:"key_used"`
+    EncryptedKey []byte `json:"encrypted_key"`
+    Salt []byte `json:"salt"`
+}
+
+func CreateEmptyDraft(metadata_collection *mongo.Collection, email_collection *mongo.Collection, usage_collection *mongo.Collection) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        responder := api_utils.NewJsonResponder[string](w)
+        user := r.Context().Value("user").(mongo_schemes.User)
+
+        tracked_usage, err := usage.GetUsage(context.TODO(), usage_collection, user.MainEmail)
+        if err != nil {
+            log.Println("Error retrieving usage:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        if tracked_usage.UsedSpace >= user.PlanConfig.SpaceLimit {
+            responder.WriteError("You don't have space left")
+            return
+        }
+
+        request, err := api_utils.DecodeJson[CreateEmptyDraftRequest](r.Body)
+
+        email := mongo_schemes.Email{
+            Encryption: request.Encryption,
+            AttachmentSize: 0,
+            From: user.MainEmail,
+        }
+
+        inserted, err := email_collection.InsertOne(context.TODO(), email)
+        if err != nil {
+            log.Println("Failed to create email", err)
+            responder.WriteError("Server error")
+            return
+        }
+
+        inserted_id := inserted.InsertedID.(primitive.ObjectID)
+
+        metadata := mongo_schemes.Metadata{
+            UsedAddress: user.MainEmail,
+            From: user.MainEmail,
+            KeyUsed: request.KeyUsed,
+            EncryptedKey: request.EncryptedKey,
+            Salt: request.Salt,
+            EmailID: inserted_id,
+            Attachment: true,
+            Draft: true,
+        }
+
+        inserted_metadata_id, err := metadata_collection.InsertOne(context.TODO(), metadata)
+        if err != nil {
+            log.Println("Error creating metadata")
+            responder.WriteError("Server error")
+            return
+        }
+
+        metadata_id := inserted_metadata_id.InsertedID.(primitive.ObjectID)
+
+        responder.WriteData(metadata_id.Hex())
+    })
+}
+
+func UploadFile(minio_client *minio.Client, bucket_name string, metadata_collection *mongo.Collection, email_collection *mongo.Collection, usage_collection *mongo.Collection) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        responder := api_utils.NewJsonResponder[string](w)
+
+        user := r.Context().Value("user").(mongo_schemes.User)
+
+        tracked_usage, err := usage.GetUsage(context.TODO(), usage_collection, user.MainEmail)
+        if err != nil {
+            log.Println("Error retrieving usage:", err.Error())
+            responder.WriteError("Server error")
+            return
+        }
+
+        if tracked_usage.UsedSpace >= user.PlanConfig.SpaceLimit {
+            responder.WriteError("You don't have space left")
+            return
+        }
+
+        err = r.ParseMultipartForm(25 << 20) // Max size is 25MB
+        if err != nil {
+            log.Println("Error decoding multipart form", err)
+            responder.WriteError("File too big, max is 25Mb")
+            return
+        }
+
+        draft_id_string := r.FormValue("draft_id")
+        if draft_id_string == "" {
+            log.Println("Draft id is empty")
+            responder.WriteError("Bad parameters")
+            return
+        } else {
+            draft_id, err := primitive.ObjectIDFromHex(draft_id_string)
+            if err != nil {
+                log.Println("Error decoding id", err)
+                responder.WriteError("Bad parameters")
+                return
+            }
+
+
+            file, handler, err := r.FormFile("file")
+            if err != nil {
+                log.Println("Error getting uploaded file", err)
+                responder.WriteError("Server error")
+                return
+            }
+            defer file.Close()
+
+            uuid := uuid.New().String()
+            size := int64(handler.Size)
+            _, err = minio_client.PutObject(context.TODO(), bucket_name, uuid, file, size, minio.PutObjectOptions{})
+            if err != nil {
+                log.Println("Error uploading attachment", err)
+                responder.WriteError("Server error")
+                return
+            }
+
+            a := mongo_schemes.Attachment{
+                Filename: handler.Filename,
+                ContentType: handler.Header.Get("Content-Type"),
+                Size: size,
+                Reference: uuid,
+            }
+
+            filter := bson.D{{Key: "_id", Value: draft_id}}
+            email, err := getEmailByFilter(context.TODO(), metadata_collection, filter)
+            if err != nil {
+                log.Println("Error getting email", err)
+                responder.WriteError("Server error")
+                return
+            }
+
+            if email.Email.AttachmentSize + size > 25 << 20 {
+                log.Println("Tried to upload an attachment that is too big", err)
+                responder.WriteError("Attachments size more than 25MB")
+                return
+            }
+
+            update := bson.D{
+                {Key: "$push", Value: bson.M{"attachments": a}},
+                {Key: "$inc", Value: bson.M{"attachment_size": size}},
+            }
+            _, err = email_collection.UpdateByID(context.TODO(), email.Email.Id, update)
+
+            if err != nil {
+                log.Println("Error updating attachments", err)
+                responder.WriteError("Server error")
+                return
+            }
+
+            responder.WriteData(uuid)
+        }
     })
 }
 
@@ -451,174 +948,6 @@ func split_user_sub(user string) (string, string, error) {
     subaddress := user_parts[1]
     return username, subaddress, nil
 }
-
-// func store_owned_messages(ctx context.Context, user_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, from string, recipients []RecipientDomainWrapper, headers map[string]string, body string) chan error {
-// func store_owned_messages(ctx context.Context, user_collection *mongo.Collection, metadata_collection *mongo.Collection, email_collection *mongo.Collection, from string, recipients []RecipientDomainWrapper, body string) chan error {
-//     ch := make(chan error)
-//     go func() {
-//         owned_emails := mapFunc(func(i int, r RecipientDomainWrapper) string { return r.Email }, recipients)
-//         filter := bson.D{{Key: "email", Value: bson.M{"$in": owned_emails}}}
-//
-//         cur, err := user_collection.Find(context.Background(), filter)
-//         if err != nil {
-//             ch <- err
-//             return
-//         }
-//         defer cur.Close(context.Background())
-//
-//         var users []mongo_schemes.User = make([]mongo_schemes.User, 0)
-//         if err := cur.All(context.Background(), &users); err != nil {
-//             ch <- err
-//             return
-//         }
-//
-//         email_key := make([]byte, 32)
-//         _, err = rand.Read(email_key)
-//         if err != nil {
-//             ch <- err
-//             return
-//         }
-//
-//         encrypted_body_encoded, err := encryption.AesEncryptCBC(email_key, []byte(body))
-//         if err != nil {
-//             ch <- err
-//             return
-//         }
-//
-//         dh_throw_priv, err := ecdh.P256().GenerateKey(rand.Reader)
-//         if err != nil {
-//             ch <- err
-//             return
-//         }
-//
-//         dh_throw_pub := dh_throw_priv.PublicKey()
-//         dh_throw_pub_encoded := base64.StdEncoding.EncodeToString(dh_throw_pub.Bytes())
-//
-//         metadata := make([]mongo_schemes.Metadata, 0, len(recipients))
-//         for _, recipient := range recipients {
-//             found := false
-//             for _, user := range users {
-//                 if user.MainEmail == recipient.Email {
-//                     recipient_key := user.MainKey
-//
-//                     mlkem_pub_bytes := make([]byte, 0)
-//                     _, err := base64.StdEncoding.Decode(mlkem_pub_bytes, []byte(recipient_key.MLKEMPublicKey))
-//                     if err != nil {
-//                         ch <- err
-//                         return
-//                     }
-//
-//                     dh_pub := make([]byte, 0)
-//                     _, err = base64.StdEncoding.Decode(dh_pub, []byte(recipient_key.DHPublicKey))
-//                     if err != nil {
-//                         ch <- err
-//                         return
-//                     }
-//                     dh_pub_key, err := ecdh.P256().NewPublicKey(dh_pub)
-//                     if err != nil {
-//                         ch <- err
-//                         return
-//                     }
-//
-//                     dh_shared_secret, err := dh_throw_priv.ECDH(dh_pub_key)
-//                     if err != nil {
-//                         ch <- err
-//                         return
-//                     }
-//
-//                     mlkem_pub, err := mlkem.NewEncapsulationKey1024(mlkem_pub_bytes)
-//
-//                     ciphertext, mlkem_shared_secret := mlkem_pub.Encapsulate()
-//                     if err != nil {
-//                         ch <- err
-//                         return
-//                     }
-//
-//                     var shared_secret [32]byte
-//                     for i := range mlkem_shared_secret {
-//                         shared_secret[i] = dh_shared_secret[i] ^ mlkem_shared_secret[i]
-//                     }
-//
-//                     shared_secret = sha256.Sum256(shared_secret[:])
-//
-//                     encrypted_email_key_encoded, err := encryption.AesEncryptGCM(shared_secret[:], email_key)
-//
-//                     ciphertext_encoded := base64.StdEncoding.EncodeToString(ciphertext)
-//
-//
-//                     m := mongo_schemes.Metadata{
-//                         UsedAddress: recipient.Email,
-//                         KeyUsed: recipient_key.KeyId,
-//                         Ciphertext: ciphertext_encoded,
-//                         EncryptedKey: encrypted_email_key_encoded,
-//                     }
-//                     if recipient.Sender {
-//                         m.Sent = true
-//                     }
-//                     if recipient.BCC {
-//                         m.BCC = true
-//                     }
-//
-//                     metadata = append(metadata, m)
-//                     found = true
-//                     break
-//                 }
-//             }
-//
-//             if found != true {
-//                 ch <- fmt.Errorf("failed to find user: %s",recipient.Email)
-//                 return
-//             }
-//         }
-//
-//         email := mongo_schemes.Email{
-//             From: from,
-//             // Headers: headers,
-//             Body: encrypted_body_encoded,
-//             DHPublicKey: dh_throw_pub_encoded,
-//         }
-//
-//         email_res, err := email_collection.InsertOne(ctx, email)
-//         if err != nil {
-//             ch <- err
-//             return
-//         }
-//
-//         email_id := email_res.InsertedID.(primitive.ObjectID)
-//
-//         final_metadata := mapFunc(func(i int, m mongo_schemes.Metadata) interface{} {
-//             m.EmailID = email_id
-//             return m
-//         }, 
-//         metadata)
-//
-//         _, err = metadata_collection.InsertMany(ctx, final_metadata)
-//
-//         // Handle errors outside
-//         ch <- err
-//     }()
-//     return ch
-// }
-
-// func send_emails_to_domain(from string, users []RecipientDomainWrapper, domain string, message []byte) chan error {
-//     ret := make(chan error)
-//
-//     go func() {
-//         domain_emails := mapFunc(func(i int, u RecipientDomainWrapper) string { return u.Email }, users)
-//         url := domain + ":smtp"
-//         client, err := smtp.Dial(url)
-//         if err != nil {
-//             ret <- err
-//             return
-//         }
-//
-//         err = client.SendMail(from, domain_emails, bytes.NewReader(message))
-//
-//         // Handle errors in main
-//         ret <- err
-//     }()
-//     return ret
-// }
 
 type Destination int
 

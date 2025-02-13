@@ -85,6 +85,7 @@ type Metadata struct {
     Archived bool `bson:"archived,omitempty"`
     Tags []string `bson:"tags,omitempty"`
     Deleted bool `bson:"deleted,omitempty"`
+    Draft bool `bson:"draft,omitempty"`
     Attachment bool `bson:"attachment,omitempty"`
 }
 
@@ -100,8 +101,8 @@ type Email struct {
     Encryption int `bson:"encryption" json:"encryption"`
     DHPublicKey []byte `bson:"dh_public"`
     From string `bson:"from" json:"from"`
-    FromId primitive.ObjectID `bson:"from_id"`
     Headers string `bson:"headers" json:"headers"`
     Body []byte `bson:"body" json:"body"`
     Attachments []Attachment `bson:"attachments,omitempty"`
+    AttachmentSize int64 `bson:"attachment_size,omitempty"`
 }
